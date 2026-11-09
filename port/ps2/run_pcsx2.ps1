@@ -14,10 +14,16 @@ param(
     [int]$Seconds = 25,             # 0: interactive session, until the user closes PCSX2
     [string]$Pcsx2Dir = (Join-Path $PSScriptRoot '../../.emu/.ps2/pcsx2-v2.8.2-windows-x64-Qt'),
     [string]$Renderer = "13",          # software. Auto (D3D12) hangs on the first displayed frame here; 11 is null
-    [string]$GameDir = (Join-Path $PSScriptRoot '../../.game/DJMAX_Fever_(Patched)_[A912C17D]/PSP_GAME')
+    [string]$GameDir = (Join-Path $PSScriptRoot '../../.game/DJMAX_Fever_(Patched)_[A912C17D]/PSP_GAME'),
+    [string]$TestCard = ''          # optional separate card filename for repeatable tests
 )
 
 $ErrorActionPreference = "Stop"
+# PCSX2's host filesystem boundary compares canonical paths. A path containing
+# '..' can otherwise reject even PSP_GAME inside the ELF directory.
+$Elf = [System.IO.Path]::GetFullPath($Elf)
+$Pcsx2Dir = [System.IO.Path]::GetFullPath($Pcsx2Dir)
+$GameDir = [System.IO.Path]::GetFullPath($GameDir)
 $exe = Join-Path $Pcsx2Dir "pcsx2-qt.exe"
 $ini = Join-Path $Pcsx2Dir "inis\PCSX2.ini"
 $log = [System.IO.Path]::ChangeExtension($Elf, ".emulog.txt")
@@ -60,6 +66,17 @@ try {
     }
     $cfg = Set-IniValue $cfg 'Logging' 'EnableEEConsole' 'true'
     $cfg = Set-IniValue $cfg 'EmuCore' 'HostFs' 'true'
+    if ($TestCard) {
+        if ([System.IO.Path]::GetFileName($TestCard) -ne $TestCard) { throw 'TestCard must be a filename' }
+        $cardDir = Join-Path $Pcsx2Dir 'memcards'
+        $card = Join-Path $cardDir $TestCard
+        if (-not (Test-Path -LiteralPath $card)) {
+            $oldCard = [regex]::Match($cfg, '(?m)^Slot1_Filename\s*=\s*(.+?)\r?$').Groups[1].Value.Trim()
+            if (-not $oldCard) { throw 'Cannot find the existing card to copy for testing' }
+            Copy-Item -LiteralPath (Join-Path $cardDir $oldCard) -Destination $card
+        }
+        $cfg = Set-IniValue $cfg 'MemoryCards' 'Slot1_Filename' $TestCard
+    }
     if ($Renderer) { $cfg = Set-IniValue $cfg 'EmuCore/GS' 'Renderer' $Renderer }
     Set-Content -Path $ini -Value $cfg -NoNewline
 

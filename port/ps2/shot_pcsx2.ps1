@@ -6,7 +6,8 @@ param(
     [string]$At = "30",                # comma-separated: -File does not parse arrays
     [int]$Seconds = 60,
     [string]$Renderer = "13",          # software: D3D12 hangs on the first real frame here
-    [string]$Elf = (Join-Path $PSScriptRoot '../../build/ps2/out/djmax.elf')
+    [string]$Elf = (Join-Path $PSScriptRoot '../../build/ps2/out/djmax.elf'),
+    [string]$TestCard = ''
 )
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Drawing
@@ -45,7 +46,8 @@ New-Item -ItemType Directory -Force -Path $Out | Out-Null
 
 # Not -WindowStyle Hidden: the child inherits it and PCSX2's window never shows.
 $runner = Start-Process powershell -PassThru -NoNewWindow -ArgumentList @(
-    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "$PSScriptRoot\run_pcsx2.ps1", '-Seconds', "$Seconds", '-Renderer', $Renderer, '-Elf', $Elf) -RedirectStandardOutput (Join-Path $Out "run.txt")
+    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "$PSScriptRoot\run_pcsx2.ps1", '-Seconds', "$Seconds", '-Renderer', $Renderer, '-Elf', $Elf,
+    '-TestCard', $(if ($TestCard) { $TestCard } else { 'DJMAX-Automated.ps2' })) -RedirectStandardOutput (Join-Path $Out "run.txt")
 
 $t0 = Get-Date
 foreach ($s in ($At -split ',' | ForEach-Object { [int]$_ } | Sort-Object)) {

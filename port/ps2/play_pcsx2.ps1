@@ -19,7 +19,7 @@ if (Test-Path -LiteralPath $bgaManifest) {
         if (-not (Test-Path -LiteralPath $video)) { throw "Falta el BGA convertido: $video" }
     }
 }
-foreach ($name in @('autopad.txt', 'gedump.txt', 'gewatch.txt', 'snddump.txt', 'at3test.txt')) {
+foreach ($name in @('autopad.txt', 'gedump.txt', 'gewatch.txt', 'snddump.txt', 'at3test.txt', 'saveprune.txt', 'savecheck.txt', 'heapdump.txt')) {
     if (Test-Path -LiteralPath (Join-Path $out $name)) {
         throw "Hay una prueba automatica activa: $out\$name. Renombrala antes de jugar."
     }

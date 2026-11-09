@@ -50,6 +50,8 @@ python tools-src/prepare_base.py '.game/DJMAX_Fever_(Patched)_[A912C17D]/PSP_GAM
 
 Alternatively, place PCSX2 under `.emu/.ps2/pcsx2-v2.8.2-windows-x64-Qt` and run `Jugar-DJMAX.cmd`.
 
+Automated captures (`shot_pcsx2.ps1`) use a separate `DJMAX-Automated.ps2` card, initially copied from slot 1. The normal launcher keeps your selected card.
+
 The runner enables host filesystem access and software rendering, restoring the emulator INI when it exits. It creates a local PSP_GAME junction next to the ELF. Use a test memory card: the runtime formats a previously unformatted PS2 card. The BIOS and emulator settings are not distributed.
 
 ## Source layout and attribution
