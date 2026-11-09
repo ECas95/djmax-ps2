@@ -1,0 +1,14 @@
+Source: https://github.com/hrydgard/ppsspp/tree/master/ext/at3_standalone (fetched 2026-11-07)
+FFmpeg's ATRAC3/ATRAC3+ decoders made standalone by PPSSPP. LGPL 2.1 or later (see file headers).
+
+Local changes for the DJMAX PS2 port (grep DJMX):
+- atrac3plus.cpp: tables_data (617 KB of VLC tables) is a pointer allocated (zeroed: the
+  VLC builder requires it) in ff_atrac3p_init_vlcs instead of a static array: the EE ELF
+  has no room for it. The allocation comes from the decoder arena (port/ps2/ps2_at3.cpp).
+  Also includes mem.h for av_mallocz.
+- atrac3plusdsp.cpp, waves_synth: `amp` is float instead of double. The EE has no double
+  FPU, so the 128-sample tone loop ran in software floating point. Built with
+  -fsingle-precision-constant for the same reason (port/ps2/build.sh); only the
+  one-time table setup in fft.cpp still uses double.
+
+Build shims (not here): port/ps2/at3_shim/ (Common/MemoryUtil.h, Common/Log.h, ppsspp_config.h).
