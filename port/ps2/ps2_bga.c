@@ -1,8 +1,10 @@
 /* Stream independent compressed INDEX8 frames into the game's marked BGA texture.
- * The music output sample counter is the clock: pause/restart follow audio.
+ * The presented music sample is the clock: pause/restart follow audible audio.
  * Workspace comes from guest sysmem, not the almost-full EE image/heap.
  */
 #include "ps2_bga.h"
+#include "ps2_bga_clock.h"
+#include "ps2_snd.h"
 #include "ps2_hle.h"
 #include "runtime_min.h"
 #include <fcntl.h>
@@ -15,15 +17,15 @@
 #define FRAME_BYTES (1024u + 65536u)
 #define PACK_BYTES  (68u * 1024u)
 static uint32_t g_uid, g_last = ~0u, g_header[8], g_idle, g_seen;
-static uint64_t g_samples;
+static ps2_bga_clock g_clock;
 static uint8_t *g_work;
 static uint32_t g_zused;
 static int g_fd = -1;
 static char g_name[17];
 
-void ps2_bga_audio_reset(void) { g_samples = 0; g_last = ~0u; }
-void ps2_bga_audio_seek(uint32_t sample) { g_samples = sample; g_last = ~0u; }
-void ps2_bga_audio_samples(uint32_t n) { g_samples += n; }
+void ps2_bga_audio_reset(void) { ps2_bga_clock_seek(&g_clock, 0); g_last = ~0u; }
+void ps2_bga_audio_seek(uint32_t sample) { ps2_bga_clock_seek(&g_clock, sample); g_last = ~0u; }
+void ps2_bga_audio_submit(uint64_t at, uint32_t n) { ps2_bga_clock_submit(&g_clock, at, n); }
 static voidpf zalloc_bga(voidpf opaque, uInt count, uInt size) {
     (void)opaque;
     uint32_t n = count * size;
@@ -68,7 +70,8 @@ uint32_t ps2_bga_texture(uint8_t *pixels, uint8_t *palette) {
     g_seen = 1; g_idle = 0;
     if (strcmp(g_name, name)) open_bga(name);
     if (g_fd < 0) return 0;
-    uint32_t frame = (uint32_t)(g_samples * g_header[3] / (44100ull * g_header[4]));
+    const uint64_t samples = ps2_bga_clock_position(&g_clock, ps2_snd_playhead());
+    uint32_t frame = (uint32_t)(samples * g_header[3] / (44100ull * g_header[4]));
     if (frame >= g_header[5]) frame = g_header[5] - 1u;
     if (frame != g_last) {
         uint32_t offsets[2];
@@ -90,7 +93,9 @@ uint32_t ps2_bga_texture(uint8_t *pixels, uint8_t *palette) {
         memcpy(pixels, g_work + PACK_BYTES + 1024, 65536);
         g_last = frame;
         if (previous == ~0u || frame / 300u != previous / 300u)
-            psp_printf("[bga] %s frame %u time=%u ms\n", name, frame, (uint32_t)(g_samples * 1000u / 44100u));
+            psp_printf("[bga] %s frame %u time=%u ms queued=%u ms\n", name, frame,
+                       (uint32_t)(samples * 1000u / 44100u),
+                       (uint32_t)((g_clock.submitted - samples) * 1000u / 44100u));
     }
     return frame + 1u; /* forces cache invalidation even if sampled pixels match */
 }

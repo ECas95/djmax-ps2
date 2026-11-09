@@ -18,5 +18,7 @@ void ps2_snd_mix(uint64_t at, const int16_t *pcm, uint32_t n, int stereo,
 void ps2_snd_report(uint64_t now);
 /* From the vblank interrupt: wakes the thread that sends the mix to the SPU2. */
 void ps2_snd_vblank_isr(void);
+/* Estimated sample currently consumed by audsrv, in the output mix timeline. */
+uint64_t ps2_snd_playhead(void);
 
 #endif

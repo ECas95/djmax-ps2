@@ -294,7 +294,7 @@ static void audio_output(int blocking, int panned) {
     }
     g_ch[ch].next_smp = at + n;
     ps2_snd_mix(at, pcm, n, !g_ch[ch].mono, lv, rv, now);
-    if (pcm && !strcmp(ps2_sched_current_name(), "stream_sound_poll_thread")) ps2_bga_audio_samples(n);
+    if (pcm && !strcmp(ps2_sched_current_name(), "stream_sound_poll_thread")) ps2_bga_audio_submit(at, n);
     psp_ret(n);
 }
 

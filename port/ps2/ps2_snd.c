@@ -46,6 +46,8 @@
 #define MIX_N 8192u           /* power of two, 186 ms: > SND_LAG + the longest output buffer */
 static int32_t (*g_mix)[2];  /* MIX_N frames, in guest RAM (ps2_snd_init): the ELF has no room */
 static volatile uint64_t g_sent;   /* absolute sample index of the next sample to send */
+static volatile uint64_t g_presented, g_presented_at;
+static uint64_t g_playhead;
 static volatile int g_state;  /* 0 not init, -1 failed, 1 ready, 2 running */
 static volatile int g_mixing; /* main thread inside ps2_snd_mix: the pump waits a tick */
 static volatile uint32_t g_late, g_drop, g_skip, g_busy;
@@ -65,12 +67,23 @@ extern void *_gp;
 
 uint64_t ps2_audio_now_smp(void);   /* ps2_audio.c */
 
+uint64_t ps2_snd_playhead(void) {
+    if (g_state != 2) return 0;
+    const uint64_t now = ps2_audio_now_smp();
+    uint64_t played = g_presented + (now > g_presented_at ? now - g_presented_at : 0);
+    if (played > g_sent) played = g_sent;
+    if (played > g_playhead) g_playhead = played;
+    return g_playhead;
+}
+
 static inline int16_t clamp16(int32_t v) { return v > 32767 ? 32767 : v < -32768 ? -32768 : (int16_t)v; }
 
 /* Send what is final (older than now - lag). Pump thread only. */
 static void snd_pump(uint64_t now) {
     if (g_state == 1) {                     /* first tick: the timeline starts now */
         g_sent = now > SND_LAG ? now - SND_LAG : 0;
+        g_presented = g_sent;
+        g_presented_at = now;
         g_state = 2;
     }
     if (g_state != 2 || now < SND_LAG) return;
@@ -98,6 +111,13 @@ static void snd_pump(uint64_t now) {
          * up to 0.4% faster than real time, enough to drain the clock drift. */
         uint32_t ks = k;
         g_queued = audsrv_queued();
+        /* g_sent includes this block, but it has not reached audsrv yet.
+         * Publish the position behind its existing queue, never the write head.
+         * Main cannot run until this higher-priority pump yields. */
+        const uint64_t behind = k + (uint32_t)(g_queued > 0 ? g_queued : 0) / 4u;
+        const uint64_t played = g_sent > behind ? g_sent - behind : 0;
+        if (played > g_presented) g_presented = played;
+        g_presented_at = ps2_audio_now_smp();
         if (g_queued < g_qmin) g_qmin = g_queued;
         if (g_queued > SND_QHIGH && k > 16u) {
             const uint32_t cut = 1u + k / 256u;

@@ -51,6 +51,14 @@ python tools-src/prepare_base.py '.game/DJMAX_Fever_(Patched)_[A912C17D]/PSP_GAM
 Alternatively, place PCSX2 under `.emu/.ps2/pcsx2-v2.8.2-windows-x64-Qt` and run `Jugar-DJMAX.cmd`.
 
 Automated captures (`shot_pcsx2.ps1`) use a separate `DJMAX-Automated.ps2` card, initially copied from slot 1. The normal launcher keeps your selected card.
+Test runs temporarily disable the emulator's Space pause shortcut so typing in another task cannot pause a replay at startup.
+
+The video texture clock follows the estimated audio output position, accounting for queued samples, pauses and seeks. Its standalone regression can be run with a host C compiler:
+
+```bash
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Iport/ps2 tools-src/test_bga_clock.c -o /tmp/djmax-bga-clock
+/tmp/djmax-bga-clock
+```
 
 The runner enables host filesystem access and software rendering, restoring the emulator INI when it exits. It creates a local PSP_GAME junction next to the ELF. Use a test memory card: the runtime formats a previously unformatted PS2 card. The BIOS and emulator settings are not distributed.
 

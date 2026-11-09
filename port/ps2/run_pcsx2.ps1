@@ -76,6 +76,10 @@ try {
             Copy-Item -LiteralPath (Join-Path $cardDir $oldCard) -Destination $card
         }
         $cfg = Set-IniValue $cfg 'MemoryCards' 'Slot1_Filename' $TestCard
+        # Automated replays must not pause when Space is typed in another task
+        # while PCSX2 briefly owns focus at startup. Restored with the full INI.
+        $cfg = Set-IniValue $cfg 'UI' 'StartPaused' 'false'
+        $cfg = Set-IniValue $cfg 'Hotkeys' 'TogglePause' ''
     }
     if ($Renderer) { $cfg = Set-IniValue $cfg 'EmuCore/GS' 'Renderer' $Renderer }
     Set-Content -Path $ini -Value $cfg -NoNewline
