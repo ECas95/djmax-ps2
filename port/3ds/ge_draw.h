@@ -58,6 +58,9 @@ int ge_draw_ready(void);
  * Without one, geometry is decoded/censused but not rasterised. */
 void ge_draw_set_target(void *target);
 void ge_draw_set_bottom(void *target);
+void ge_draw_set_right(void *target);
+int  ge_draw_split_active(void);
+void ge_draw_cycle_layout(void);
 void ge_draw_set_clear(uint32_t rgba);   /* 0xRRGGBBAA, default 0x000000FF */
 
 /* Interprets one GE list, drawing into the current PICA frame.

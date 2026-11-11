@@ -328,6 +328,7 @@ uint64_t psp_dispatch_calls(void) { return g_calls; }
 void psp_set_miss_handler(psp_miss_fn_t fn) { g_miss = fn; }
 
 extern uint32_t psp_last_enter;
+extern void ps2_audio_preempt(void);
 void psp_dispatch(uint32_t addr) {
     g_last = addr;
     if (addr < 0x1000u) {
@@ -337,6 +338,11 @@ void psp_dispatch(uint32_t addr) {
     for (int i = 0; i < 7; i++)
         if (addr == g_ctor[i]) { g_ctor_hits++; break; }
     psp_cpu.pc = addr;
+
+    /* El cuerpo de un frame puede correr 16 ms sin tocar HLE: sin este punto
+     * de preempt el hilo SAS solo produce un grano por frame (voces a 1/3). */
+    static uint32_t pp;
+    if (((++pp) & 255u) == 0u) ps2_audio_preempt();
 
     if (g_budget && ++g_calls >= g_budget) {
         g_budget = 0;

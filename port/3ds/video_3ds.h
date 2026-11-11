@@ -25,5 +25,6 @@ int  video_log_ok(void);
  * debug está activa vía sdmc:/djmx_console.flag). */
 void *video_pica_target(void);
 void *video_pica_bottom(void);
+void *video_pica_right(void);
 int video_pica_ready(void);
 #endif

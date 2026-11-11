@@ -23,6 +23,7 @@ void ps2_ge_init(void) {
         ge_draw_init();
         ge_draw_set_target(video_pica_target());
         ge_draw_set_bottom(video_pica_bottom());
+        ge_draw_set_right(video_pica_right());
         ge_draw_set_magenta(0); /* Normal boot: test mode temporarily enables magenta. */
     }
     psp_printf("[GE] pica=%d shader=%d target=%p\n",

@@ -12,6 +12,7 @@ int  ps2_audio_ok(void);
 
 /* FIFO por canal, en frames estéreo s16 a 44100 Hz. */
 uint32_t ps2_audio_level(int ch);                              /* frames en cola */
+uint32_t ps2_audio_underruns(int ch);                          /* callbacks sin trozo entero */
 void     ps2_audio_push(int ch, const int16_t *lr, uint32_t frames);
 void     ps2_audio_reset(int ch);
 

@@ -33,6 +33,8 @@ int  ps2_sched_start(uint32_t uid, uint32_t arglen, uint32_t arg);
 
 /* Yield to the next ready thread; returns when this thread resumes. */
 void ps2_sched_yield(void);
+/* Yield directly to uid (if ready): audio grains need sub-round-robin latency. */
+int  ps2_sched_yield_to(uint32_t uid);
 int  ps2_sched_set_prio(uint32_t uid, uint32_t prio);
 void ps2_sched_preempt(void);
 /* Block forever (until the budget stops the run). */

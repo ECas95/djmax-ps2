@@ -31,6 +31,7 @@ uint64_t ps2_time_us(void) {
  * el que espera cede (ps2_audio_wait_until). */
 #define AWAIT_MAX 16
 static uint64_t g_await[AWAIT_MAX];
+static uint32_t g_await_uid[AWAIT_MAX];
 static int      g_nwait;
 static void   (*g_pump)(void);
 
@@ -44,16 +45,19 @@ void ps2_audio_wait_until(uint64_t when_us) {
     int slot = 0;
     while (slot < AWAIT_MAX - 1 && g_await[slot]) slot++;
     g_await[slot] = when_us;
+    g_await_uid[slot] = ps2_sched_current_uid();
     g_nwait++;
     uint32_t spins = 0;
     for (;;) {
         if (g_pump) g_pump();
         ps2_sched_yield();
-        const uint64_t now = ps2_time_us();
-        if (now >= when_us) break;
-        /* dormir solo en esperas largas: las de 1 grano (5.8 ms) van por yields */
-        if ((++spins & 31u) == 0u && when_us - now > 2000u)
-            svcSleepThread(300000);
+        if (ps2_time_us() >= when_us) break;
+        if ((++spins & 15u) == 0u) {
+            const uint64_t now = ps2_time_us();
+            uint64_t ns = (when_us - now) * 1000ull;
+            if (ns > 300000ull) ns = 300000ull;            /* 0.3 ms */
+            svcSleepThread((s64)ns);
+        }
     }
     g_await[slot] = 0;
     g_nwait--;
@@ -62,12 +66,20 @@ void ps2_audio_wait_until(uint64_t when_us) {
 void ps2_audio_preempt(void) {
     if (!g_nwait) return;
     const uint64_t now = ps2_time_us();
+    int best = -1;
+    uint64_t best_when = 0;
     for (int i = 0; i < AWAIT_MAX; i++)
-        if (g_await[i] && g_await[i] <= now) {
-            g_preempt_fires++;
-            ps2_sched_yield();
-            return;
+        if (g_await[i] && g_await[i] <= now &&
+            (best < 0 || g_await[i] < best_when)) {
+            best = i;
+            best_when = g_await[i];
         }
+    if (best < 0) return;
+    g_preempt_fires++;
+    /* al deadline MÁS vencido: el round-robin y el primer slot dejaban al
+     * hilo SAS 2-3 frames sin turno (granos de 5.8 ms a ritmo de 16 ms) */
+    if (ps2_sched_yield_to(g_await_uid[best]) != 0)
+        ps2_sched_yield();
 }
 
 #define FIFO_FRAMES 16384u              /* potencia de 2; ~0.37 s por canal */
@@ -107,13 +119,17 @@ void ps2_audio_push(int ch, const int16_t *lr, uint32_t frames) {
     __atomic_store_n(&g_wr[ch], wr + frames, __ATOMIC_RELEASE);
 }
 
-/* Suma todos los FIFOs en un trozo de salida; canal sin datos aporta silencio. */
+/* Suma todos los FIFOs en un trozo de salida; canal sin datos aporta silencio.
+ * El HLE deja a cada canal producir ~23 ms por delante (jitter buffer): un
+ * parcial aquí es un underrun real y se contabiliza. */
+static uint32_t g_underrun[PS2_AUDIO_CH];
 static void mix_pull(int16_t *dst, uint32_t frames) {
     memset(dst, 0, (size_t)frames * 2u * sizeof(int16_t));
     for (int c = 0; c < PS2_AUDIO_CH; c++) {
         const uint32_t rd    = g_rd[c];
         const uint32_t avail = __atomic_load_n(&g_wr[c], __ATOMIC_ACQUIRE) - rd;
         const uint32_t n     = avail < frames ? avail : frames;
+        if (n && n < frames) g_underrun[c]++;
         for (uint32_t i = 0; i < n; i++) {
             const uint32_t s = (rd + i) & (FIFO_FRAMES - 1u);
             int l = dst[i * 2u]      + g_fifo[c][s * 2u];
@@ -125,6 +141,9 @@ static void mix_pull(int16_t *dst, uint32_t frames) {
         }
         __atomic_store_n(&g_rd[c], rd + n, __ATOMIC_RELEASE);
     }
+}
+uint32_t ps2_audio_underruns(int ch) {
+    return (ch >= 0 && ch < PS2_AUDIO_CH) ? g_underrun[ch] : 0u;
 }
 
 static void ndsp_cb(void *ud) {

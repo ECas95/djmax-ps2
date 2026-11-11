@@ -232,6 +232,17 @@ void ps2_sched_yield(void) {
     switch_out(TS_READY);
 }
 
+/* El pump arranca por este hilo en el siguiente turno (una sola vez). */
+static int g_force_next = -1;
+int ps2_sched_yield_to(uint32_t uid) {
+    if (g_cur < 0) return -1;
+    const int i = find(uid);
+    if (i < 0 || i == g_cur || g_th[i].state != TS_READY) return -1;
+    g_force_next = i;
+    switch_out(TS_READY);
+    return 0;
+}
+
 /* PSP priorities (lower number = more urgent) only matter here at the two calls that
  * hand the CPU over at once on a PSP: starting a thread more urgent than the caller, and
  * the caller making itself less urgent than a ready thread. The movie player depends on
@@ -336,7 +347,13 @@ void ps2_sched_dump_stacks(void) {
 int ps2_sched_pump(void) {
     int switches = 0;
     for (;;) {
-        const int nxt = first_ready_except(g_cur);   /* rotate after current */
+        int nxt;
+        if (g_force_next >= 0 && g_th[g_force_next].used &&
+            g_th[g_force_next].state == TS_READY && g_force_next != g_cur)
+            nxt = g_force_next;
+        else
+            nxt = first_ready_except(g_cur);   /* rotate after current */
+        g_force_next = -1;
         if (nxt < 0) break;
 
         if (setjmp(g_sched_ctx) == 0) {

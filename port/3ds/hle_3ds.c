@@ -317,6 +317,8 @@ static void hle_DelayThread(void) {
         if (dl < 24u) { dl++;
             psp_printf("[adiag] delay th=0x%X us=%u\n", ps2_sched_current_uid(), us); } }
     if (us > 250000u) us = 250000u;
+    /* OJO: también los delays de 100 µs del hilo SAS van por wait_until: el
+     * deadline registrado es lo que hace que los preempts lo prioricen. */
     ps2_audio_wait_until(ps2_time_us() + us);
     psp_ret(0);
 }
@@ -1307,8 +1309,12 @@ static void audio_out(int ch, uint32_t voll, uint32_t volr, uint32_t buf, int bl
     int contiguous = 0;
     if (g_ach[ch].busy_until > start) {
         if (!blocking) { psp_ret(0x80260002u); return; }   /* canal ocupado */
+        /* Jitter buffer: despierta ~23 ms antes de que acabe el anterior; el
+         * reloj (next_smp/busy_until) no cambia, solo la fase del bloqueo. */
+        const uint64_t AHEAD_US = 23219u;
         start = g_ach[ch].busy_until;
-        ps2_audio_wait_until(start);
+        if (start > ps2_time_us() + AHEAD_US)
+            ps2_audio_wait_until(start - AHEAD_US);
         contiguous = 1;
     } else if (g_ach[ch].next_smp && aud_us2smp(start) < g_ach[ch].next_smp + AUDIO_LATE_OK) {
         contiguous = 1;                 /* tarde, pero su hueco aun no se reprodujo */
@@ -1341,8 +1347,10 @@ static void audio_out(int ch, uint32_t voll, uint32_t volr, uint32_t buf, int bl
             const uint64_t dt = now - t0[ch];
             uint32_t pf, wc;
             { extern void ps2_audio_diag(uint32_t *, uint32_t *); ps2_audio_diag(&pf, &wc); }
-            psp_printf("[adiag] ch=%d Hz=%u nz=%u/400 len=%u preempt=%u waits=%u\n", ch,
-                       dt ? (uint32_t)(fr[ch] * 1000000ull / dt) : 0u, nzc[ch], n, pf, wc);
+            uint32_t ur;
+            { extern uint32_t ps2_audio_underruns(int); ur = ps2_audio_underruns(ch); }
+            psp_printf("[adiag] ch=%d Hz=%u nz=%u/400 len=%u preempt=%u waits=%u under=%u\n", ch,
+                       dt ? (uint32_t)(fr[ch] * 1000000ull / dt) : 0u, nzc[ch], n, pf, wc, ur);
             t0[ch] = now; fr[ch] = 0; cn[ch] = nzc[ch] = 0;
         }
     }

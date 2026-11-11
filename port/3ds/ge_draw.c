@@ -82,7 +82,8 @@ static ge_census_call g_census[GE_CENSUS_MAX];
 static int g_census_n;
 
 static int g_magenta = 1;
-static void *g_target;            /* C3D_RenderTarget* superior */
+static void *g_target;            /* C3D_RenderTarget* superior (ojo izq.) */
+static void *g_right;             /* C3D_RenderTarget* superior ojo derecho (3D) */
 static void *g_bottom;            /* C3D_RenderTarget* inferior (puede ser NULL) */
 static uint32_t g_clear = 0x000000FFu;
 static int g_frame_open;
@@ -90,16 +91,26 @@ static int g_ready;
 static int g_route;               /* 0 = superior, 1 = inferior (por batch) */
 static int g_split;               /* frames restantes de modo dual (BGA arriba) */
 static int g_gear_seen;           /* ya pasó el chasis del gear en este frame */
+static int g_layout;              /* SELECT: 0 BGA↑/gear↓ 1 BGA↓/gear↑ 2 todo↓ 3 todo↑ */
+typedef struct { float l, r, b, t; } OrthoVP;
+static OrthoVP g_vp_top       = { 0.0f, 480.0f, 280.0f, -8.0f };
+static OrthoVP g_vp_bot       = { 0.0f, 480.0f, 316.0f, -44.0f };
+static OrthoVP g_vp_split     = { 58.67f, 421.33f, 272.0f, 0.0f };
+static OrthoVP g_vp_split_top = { 13.33f, 466.67f, 272.0f, 0.0f };
 static C3D_Mtx g_mtx_bot;
-static C3D_Mtx g_mtx_split;       /* encuadre del gear en gameplay */
+static C3D_Mtx g_mtx_split;       /* encuadre del gear: inferior */
+static C3D_Mtx g_mtx_split_top;   /* encuadre del gear: superior (modo 1) */
+static const C3D_Mtx *g_cur_mtx;  /* matriz del batch en curso */
+static const OrthoVP *g_cur_vp;
+static float g_cur_depth = 3.0f;  /* paralaje (unidades PSP) a slider=1 */
 static float g_split_cx = 240.0f;
-static C3D_Tex g_logo;            /* logo de la inferior en menús */
+static C3D_Tex g_logo;            /* logo de la pantalla libre */
 static int g_logo_ready;
 
 static Vtx *g_vb;
 static int g_vn, g_vbase; /* never reuse submitted memory within one GPU frame */
-#define GE_TEXTURE_SLOTS 64
-#define GE_TEXTURE_BUDGET (20u * 1024u * 1024u)
+#define GE_TEXTURE_SLOTS 160
+#define GE_TEXTURE_BUDGET (24u * 1024u * 1024u)
 typedef struct {
     C3D_Tex tex;
     uint32_t addr, w, h, psm, stride, clut_addr, clut_fmt, clut_cfg, swizzle;
@@ -486,18 +497,36 @@ static GpuTexSlot *texture_get(void) {
 }
 
 /* ---- draw buffer ---------------------------------------------------------- */
+static const void *g_last_rt;     /* evita re-bind del target por cada batch */
 static void flush(void) {
     if (!g_vn || !g_ready || !g_frame_open) { g_vn = 0; return; }
+    const C3D_Mtx *mx = g_cur_mtx ? g_cur_mtx : &g_mtx;
     C3D_RenderTarget *rt = (C3D_RenderTarget *)((g_route && g_bottom) ? g_bottom : g_target);
-    C3D_FrameDrawOn(rt);
+    if ((const void *)rt != g_last_rt) {
+        C3D_FrameDrawOn(rt);
+        g_last_rt = rt;
+    }
     C3D_BufInfo *bi = C3D_GetBufInfo();
     BufInfo_Init(bi);
     BufInfo_Add(bi, g_vb, sizeof(Vtx), 3, 0x210);
     GSPGPU_FlushDataCache(&g_vb[g_vbase], (size_t)g_vn * sizeof(Vtx));
-    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_uproj,
-                     (g_route && g_bottom) ? (g_split > 0 ? &g_mtx_split : &g_mtx_bot)
-                                           : &g_mtx);
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_uproj, mx);
     C3D_DrawArrays(GPU_TRIANGLES, g_vbase, g_vn);
+    /* 3D estéreo: el ojo derecho repite el batch con la ventana desplazada
+     * (paralaje positivo: la escena queda detrás del plano de pantalla). */
+    if (!g_route && g_right) {
+        const float sl = osGet3DSliderState();
+        if (sl > 0.01f && g_cur_vp) {
+            const float dx = g_cur_depth * sl;
+            C3D_Mtx m;
+            Mtx_OrthoTilt(&m, g_cur_vp->l + dx, g_cur_vp->r + dx,
+                          g_cur_vp->b, g_cur_vp->t, 0.0f, 1.0f, true);
+            C3D_FrameDrawOn((C3D_RenderTarget *)g_right);
+            C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_uproj, &m);
+            C3D_DrawArrays(GPU_TRIANGLES, g_vbase, g_vn);
+            g_last_rt = g_right;
+        }
+    }
     g_vbase += g_vn;
     g_vn = 0;
 }
@@ -564,15 +593,28 @@ static void preview_draw(void) {
 
 
 /* ---- frame lifecycle ------------------------------------------------------ */
+void ps2_sched_yield(void);
 static void frame_begin(void) {
     if (g_frame_open || !g_ready || !g_target) return;
     g_vbase = g_vn = 0;
     g_route = 0;
-    C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+    g_cur_mtx = &g_mtx;
+    g_cur_vp = &g_vp_top;
+    g_cur_depth = 3.0f;
+    /* SYNCDRAW bloquearía el host ~16 ms (GPU+vblank) matando de hambre a los
+     * hilos guest (granos SAS de 5.8 ms). Como el PSP real: la CPU sigue
+     * corriendo mientras el GE dibuja. */
+    while (!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
+        ps2_sched_yield();
+        svcSleepThread(100000);        /* 0.1 ms si nadie más está listo */
+    }
     C3D_RenderTargetClear((C3D_RenderTarget *)g_target, C3D_CLEAR_ALL, g_clear, 0);
+    if (g_right && osGet3DSliderState() > 0.01f)
+        C3D_RenderTargetClear((C3D_RenderTarget *)g_right, C3D_CLEAR_ALL, g_clear, 0);
     if (g_bottom)
         C3D_RenderTargetClear((C3D_RenderTarget *)g_bottom, C3D_CLEAR_ALL, 0x000000FFu, 0);
     C3D_FrameDrawOn((C3D_RenderTarget *)g_target);
+    g_last_rt = g_target;
     g_frame_open = 1;
 }
 static void frame_end(void) {
@@ -888,7 +930,11 @@ static void prim_run(uint32_t prim_pc, uint32_t arg) {
             if (cx > 298.67f) cx = 298.67f;
             if (cx > g_split_cx + 4.0f || cx < g_split_cx - 4.0f) {
                 g_split_cx = cx;
-                Mtx_OrthoTilt(&g_mtx_split, cx - 181.33f, cx + 181.33f,
+                g_vp_split.l = cx - 181.33f;     g_vp_split.r = cx + 181.33f;
+                g_vp_split_top.l = cx - 226.67f; g_vp_split_top.r = cx + 226.67f;
+                Mtx_OrthoTilt(&g_mtx_split, g_vp_split.l, g_vp_split.r,
+                              PSP_H, 0.0f, 0.0f, 1.0f, true);
+                Mtx_OrthoTilt(&g_mtx_split_top, g_vp_split_top.l, g_vp_split_top.r,
                               PSP_H, 0.0f, 0.0f, 1.0f, true);
             }
             static uint32_t det_logs;
@@ -897,15 +943,37 @@ static void prim_run(uint32_t prim_pc, uint32_t arg) {
                            cc.bbox[0], cc.bbox[1], cc.bbox[2], cc.bbox[3]); }
         }
     }
-    /* Sprites BGA (textura grande animada, o lateral ANCHO que no cruza el
-     * centro) van arriba; los raíles del gear (~15px) no cuentan como BGA. */
+    /* Clase del draw: gear/HUD (tras el telón) o BGA (antes, o sprite grande
+     * animado/lateral). SELECT elige en qué pantalla vive cada clase. */
     const int big_tex = texture && texture->w >= 256u;
     const int anim_bga = big_tex && texture->last_change &&
         (S.frames - texture->last_change) < 30u;
     const int lateral_bga = big_tex && (cc.bbox[2] - cc.bbox[0]) >= 60 &&
         (cc.bbox[3] - cc.bbox[1]) >= 140 &&
         (cc.bbox[0] > 260 || cc.bbox[2] < 220);
-    g_route = (g_bottom && g_split > 0 && g_gear_seen && !anim_bga && !lateral_bga) ? 1 : 0;
+    if (g_bottom && g_split > 0) {
+        const int is_gear = g_gear_seen && !anim_bga && !lateral_bga;
+        switch (g_layout) {
+        default: /* 0: BGA arriba, gear abajo */
+            if (is_gear) { g_route = 1; g_cur_mtx = &g_mtx_split; g_cur_vp = &g_vp_split; g_cur_depth = 1.5f; }
+            else         { g_route = 0; g_cur_mtx = &g_mtx;       g_cur_vp = &g_vp_top;   g_cur_depth = 6.0f; }
+            break;
+        case 1:  /* BGA abajo, gear arriba */
+            if (is_gear) { g_route = 0; g_cur_mtx = &g_mtx_split_top; g_cur_vp = &g_vp_split_top; g_cur_depth = 1.5f; }
+            else         { g_route = 1; g_cur_mtx = &g_mtx_bot;      g_cur_vp = &g_vp_bot;       g_cur_depth = 6.0f; }
+            break;
+        case 2:  /* todo abajo */
+            g_route = 1; g_cur_mtx = &g_mtx_bot; g_cur_vp = &g_vp_bot;
+            g_cur_depth = is_gear ? 1.5f : 6.0f;
+            break;
+        case 3:  /* todo arriba */
+            g_route = 0; g_cur_mtx = &g_mtx; g_cur_vp = &g_vp_top;
+            g_cur_depth = is_gear ? 1.5f : 6.0f;
+            break;
+        }
+    } else {
+        g_route = 0; g_cur_mtx = &g_mtx; g_cur_vp = &g_vp_top; g_cur_depth = 3.0f;
+    }
     if (got >= 2u) {
         /* Textura pedida pero degenerada (addr 0): la PSP muestrea negro con
          * alpha 0 y el alpha-test GREATER 0 lo descarta entero. No dibujar
@@ -1083,9 +1151,16 @@ void ge_draw_init(void) {
      * letterbox de 8 unidades; la inferior (320px) 480x360 con margen de 44. */
     Mtx_OrthoTilt(&g_mtx, 0.0f, PSP_W, PSP_H + 8.0f, -8.0f, 0.0f, 1.0f, true);
     Mtx_OrthoTilt(&g_mtx_bot, 0.0f, PSP_W, PSP_H + 44.0f, -44.0f, 0.0f, 1.0f, true);
-    /* inferior en split: 362.6x272 PSP (320x240 a escala 0.882) centrado en el gear */
-    Mtx_OrthoTilt(&g_mtx_split, g_split_cx - 181.33f, g_split_cx + 181.33f,
-                  PSP_H, 0.0f, 0.0f, 1.0f, true);
+    /* split: 362.6x272 PSP en la inferior (escala 0.882) y 453.3x272 en la
+     * superior (modo 1), ambas centradas en el gear */
+    Mtx_OrthoTilt(&g_mtx_split, g_vp_split.l, g_vp_split.r, PSP_H, 0.0f, 0.0f, 1.0f, true);
+    Mtx_OrthoTilt(&g_mtx_split_top, g_vp_split_top.l, g_vp_split_top.r, PSP_H, 0.0f, 0.0f, 1.0f, true);
+    g_cur_mtx = &g_mtx;
+    g_cur_vp = &g_vp_top;
+    {   /* layout elegido con SELECT: persiste entre sesiones */
+        FILE *f = fopen("sdmc:/djmax/layout.bin", "rb");
+        if (f) { const int c = fgetc(f); if (c >= 0) g_layout = c & 3; fclose(f); }
+    }
     g_ready = 1;
     preview_init();
     {   /* logo de la pantalla inferior (menús): RGBA8 crudo 512x128 */
@@ -1124,9 +1199,20 @@ void ge_draw_frame(uint32_t fb, uint32_t sync) {
             psp_printf("[dual] split=%d f=%u\n", on, S.frames); }
     }
     g_gear_seen = 0;
-    if (g_bottom && g_split == 0 && g_logo_ready && g_frame_open) {
+    /* Logo en la pantalla sin juego: menús → inferior; layout 2 → superior;
+     * layout 3 → inferior. En 0/1 ambas pantallas tienen juego. */
+    int logo_scr = -1;
+    if (g_bottom && g_logo_ready && g_frame_open) {
+        if (g_split == 0)            logo_scr = 1;
+        else if (g_layout == 2)      logo_scr = 0;
+        else if (g_layout == 3)      logo_scr = 1;
+    }
+    if (logo_scr >= 0) {
         flush();
-        g_route = 1;                       /* logo centrado en la inferior */
+        g_route = logo_scr;
+        g_cur_mtx = logo_scr ? &g_mtx_bot : &g_mtx;
+        g_cur_vp  = logo_scr ? &g_vp_bot  : &g_vp_top;
+        g_cur_depth = 3.0f;
         C3D_TexBind(0, &g_logo);
         C3D_TexEnv *env = C3D_GetTexEnv(0);
         C3D_TexEnvInit(env);
@@ -1143,13 +1229,44 @@ void ge_draw_frame(uint32_t fb, uint32_t sync) {
         tri(&l0, &l1, &l2); tri(&l0, &l2, &l3);
         flush();
         g_route = 0;
+        g_cur_mtx = &g_mtx;
+        g_cur_vp = &g_vp_top;
     }
     frame_end();
     g_guest_vertices_this_frame = 0;
     S.frames++;
+    {   /* 60 Hz exactos: NONBLOCK quitó el pacing del SYNCDRAW. El deadline
+         * mantiene vivos a los demás hilos (SAS) durante la espera. */
+        extern uint64_t ps2_time_us(void);
+        extern void ps2_audio_wait_until(uint64_t when_us);
+        static uint64_t next_us;
+        const uint64_t now = ps2_time_us();
+        next_us += 16667u;
+        if (!next_us || now > next_us + 100000u) next_us = now + 16667u;
+        if (next_us > now) ps2_audio_wait_until(next_us);
+        {   /* TEMP [fps]: medidor directo */
+            static uint64_t t0; static uint32_t f0;
+            if (!t0) { t0 = now; f0 = S.frames; }
+            else if (S.frames - f0 >= 300u) {
+                const uint32_t ms = (uint32_t)((now - t0) / 1000u);
+                psp_printf("[fps] f=%u avg=%u.%u\n", S.frames,
+                           ms ? 300000u / ms / 10u : 0u, ms ? (300000u / ms) % 10u : 0u);
+                t0 = now; f0 = S.frames;
+            }
+        }
+    }
 }
 
 void ge_draw_present(void) { frame_end(); }
+
+int  ge_draw_split_active(void) { return g_split > 0; }
+void ge_draw_cycle_layout(void) {
+    g_layout = (g_layout + 1) & 3;
+    psp_printf("[dual] layout=%d (SELECT)\n", g_layout);
+    FILE *f = fopen("sdmc:/djmax/layout.bin", "wb");
+    if (f) { fputc(g_layout, f); fclose(f); }
+}
+void ge_draw_set_right(void *target) { g_right = target; }
 
 int ge_draw_ready(void) { return g_ready; }
 uint32_t ge_draw_vtypes(void) { return g_n_vtype; }

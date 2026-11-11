@@ -19,8 +19,16 @@ int padRead(int port, int slot, padButtonStatus *data) {
     (void)port; (void)slot;
     hidScanInput();
     const u32 k = hidKeysHeld();
+    /* SELECT en gameplay cicla el layout de pantallas (no llega al juego). */
+    extern int ge_draw_split_active(void);
+    extern void ge_draw_cycle_layout(void);
+    static u32 prev;
+    const u32 kd = k & ~prev;
+    prev = k;
+    const int in_game = ge_draw_split_active();
+    if (in_game && (kd & KEY_SELECT)) ge_draw_cycle_layout();
     uint16_t on = 0;
-    if (k & KEY_SELECT) on |= 0x0001u;
+    if ((k & KEY_SELECT) && !in_game) on |= 0x0001u;
     if (k & KEY_START)  on |= 0x0008u;
     if (k & KEY_DUP)    on |= 0x0010u;
     if (k & KEY_DRIGHT) on |= 0x0020u;
