@@ -372,6 +372,10 @@ static int texture_upload(GpuTexSlot *t) {
         for (uint32_t i = 0; i < w * h; i++)
             if ((img.rgba[i] & t->cmask & 0xFFFFFFu) == key) img.rgba[i] = 0;
     }
+    /* DJMAX marca recortes con magenta puro en skins del gear (la PSP los
+     * tapa con draws posteriores); FF00FF exacto pasa a transparente. */
+    for (uint32_t i = 0; i < w * h; i++)
+        if ((img.rgba[i] & 0x00FFFFFFu) == 0x00FF00FFu) img.rgba[i] = 0;
     uint8_t *pica = (uint8_t *)malloc((size_t)w * h * 4u);
     if (!pica) { ge_tex_free(&img); return 0; }
     ge_tex_to_pica_rgba8(&img, pica);
@@ -826,7 +830,7 @@ static void prim_run(uint32_t prim_pc, uint32_t arg) {
             C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
         }
         C3D_TexEnvScale(env, C3D_RGB, (tf >> 16) & 1u ? GPU_TEVSCALE_2 : GPU_TEVSCALE_1);
-    } else if ((cc.tex_on && !tex_degenerate) || g_magenta) {
+    } else if (g_magenta) {
         /* Texturing requested but no usable upload: loud diagnostic magenta. */
         C3D_TexEnvSrc(env, C3D_Both, GPU_CONSTANT, 0, 0);
         C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
@@ -873,8 +877,10 @@ static void prim_run(uint32_t prim_pc, uint32_t arg) {
      * después (abajo). El modo dual queda armado 60 frames. */
     if (g_bottom && !g_gear_seen && cc.tex_on && got >= 2u) {
         const int bw = cc.bbox[2] - cc.bbox[0], bh = cc.bbox[3] - cc.bbox[1];
-        /* el chasis cruza el centro; sprites BGA laterales (p.ej. personajes) no */
-        if (bh >= 230 && bw >= 40 && bw <= 340 &&
+        const int contained = cc.bbox[1] >= -8 && cc.bbox[3] <= 276;
+        /* Firma real del gear ([cand]): telón sin textura (~143x211) centrado;
+         * pivote de ruta y disparador del modo dual. */
+        if (!texture && bh >= 180 && bw >= 80 && bw <= 260 && contained &&
             cc.bbox[0] <= 260 && cc.bbox[2] >= 220) {
             g_gear_seen = 1; g_split = 60;
             float cx = 0.5f * (float)(cc.bbox[0] + cc.bbox[2]);
@@ -885,9 +891,21 @@ static void prim_run(uint32_t prim_pc, uint32_t arg) {
                 Mtx_OrthoTilt(&g_mtx_split, cx - 181.33f, cx + 181.33f,
                               PSP_H, 0.0f, 0.0f, 1.0f, true);
             }
+            static uint32_t det_logs;
+            if (det_logs < 4u) { det_logs++;
+                psp_printf("[dual] telon f=%u bb=%d,%d-%d,%d\n", S.frames,
+                           cc.bbox[0], cc.bbox[1], cc.bbox[2], cc.bbox[3]); }
         }
     }
-    g_route = (g_bottom && g_split > 0 && g_gear_seen) ? 1 : 0;
+    /* Sprites BGA (textura grande animada, o lateral ANCHO que no cruza el
+     * centro) van arriba; los raíles del gear (~15px) no cuentan como BGA. */
+    const int big_tex = texture && texture->w >= 256u;
+    const int anim_bga = big_tex && texture->last_change &&
+        (S.frames - texture->last_change) < 30u;
+    const int lateral_bga = big_tex && (cc.bbox[2] - cc.bbox[0]) >= 60 &&
+        (cc.bbox[3] - cc.bbox[1]) >= 140 &&
+        (cc.bbox[0] > 260 || cc.bbox[2] < 220);
+    g_route = (g_bottom && g_split > 0 && g_gear_seen && !anim_bga && !lateral_bga) ? 1 : 0;
     if (got >= 2u) {
         S.submitted++;
         if (cc.tex_on) S.textured++;
@@ -1091,6 +1109,12 @@ void ge_draw_frame(uint32_t fb, uint32_t sync) {
     if (!g_frame_open) frame_begin();
     if (g_force_preview || !g_guest_vertices_this_frame) preview_draw();
     if (g_split > 0) g_split--;
+    {   /* TEMP [dual]: transiciones del split para afinar la detección */
+        static int last_on = -1;
+        const int on = g_split > 0;
+        if (on != last_on) { last_on = on;
+            psp_printf("[dual] split=%d f=%u\n", on, S.frames); }
+    }
     g_gear_seen = 0;
     if (g_bottom && g_split == 0 && g_logo_ready && g_frame_open) {
         flush();
