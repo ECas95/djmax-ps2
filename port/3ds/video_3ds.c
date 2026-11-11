@@ -61,6 +61,9 @@ void video_init(void) {
     fsInit();
     g_log = fopen("sdmc:/djmax3ds.log", "w");
     g_log_ok = g_log != NULL;
+    /* En SD real, un fflush por línea cuesta milisegundos: buffer grande y
+     * volcado periódico (video_log_flush) o al salir. */
+    if (g_log) { static char lbuf[32768]; setvbuf(g_log, lbuf, _IOFBF, sizeof lbuf); }
 
     g_ready = 1;
     psp_printf("[pica] initialized=%d target=%p\n", g_pica_ready, (void *)g_pica_target);
@@ -82,8 +85,11 @@ int video_log_ok(void) { return g_log_ok; }
 void psp_console_write(const char *s) {
     if (!s || !*s) return;
     printf("%s", s);
-    fflush(stdout);
-    if (g_log) { fputs(s, g_log); fflush(g_log); }
+    if (g_log) fputs(s, g_log);
+}
+
+void video_log_flush(void) {
+    if (g_log) fflush(g_log);
 }
 
 /* Expand one RGB565 pixel into the 3DS BGR8 triplet. */

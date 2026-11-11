@@ -1233,12 +1233,28 @@ static void hle_GeUpdateStall(void) { ps2_ge_update_stall(psp_arg(0), psp_arg(1)
  * hand-off, and never repeats a value. */
 static uint32_t g_vcount = 1;
 static uint32_t g_frame_no;
+
+/* HOME/cerrar/reposo: sin aptMainLoop el botón HOME no responde en consola.
+ * Se bombea como mucho una vez cada ~8 ms desde los puntos de frame. */
+static void ps2_sys_pump(void) {
+    static uint64_t last;
+    const uint64_t now = ps2_time_us();
+    if (now - last < 8000u) return;
+    last = now;
+    if (!aptMainLoop()) {
+        extern void psp_stop_now(void);
+        psp_printf("[sys] HOME: cerrando\n");
+        psp_stop_now();
+    }
+}
 static void hle_GetVcount(void)  { psp_ret(++g_vcount); }
-static void hle_WaitVblank(void) { g_vcount++; ps2_sched_yield(); psp_ret(0); }
+static void hle_WaitVblank(void) { g_vcount++; ps2_sys_pump(); ps2_sched_yield(); psp_ret(0); }
 static uint32_t g_fb_logged;
 static void hle_SetFrameBuf(void){
     g_frame_no++;
     g_vcount++;
+    ps2_sys_pump();
+    if ((g_frame_no % 60u) == 0u) video_log_flush();
     ps2_ge_frame(psp_arg(0), psp_arg(3));
     if (g_fb_logged < 8) {
         g_fb_logged++;
@@ -1261,6 +1277,7 @@ static uint32_t g_audio_logs, g_audio_calls, g_audio_nz;
 static int audio_wait_space(int ch, uint32_t frames) {
     uint32_t guard = 0;
     while (ps2_audio_level(ch) > frames) {
+        ps2_sys_pump();
         ps2_sched_yield();
         if ((++guard & 63u) == 0u) svcSleepThread(250000);   /* 0.25 ms */
         if (guard > 400000u) return 0;                       /* anti-cuelgue */

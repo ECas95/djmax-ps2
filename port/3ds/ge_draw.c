@@ -94,6 +94,8 @@ typedef struct {
     uint32_t addr, w, h, psm, stride, clut_addr, clut_fmt, clut_cfg, swizzle;
     uint32_t frame_used, frame_loaded;
     uint32_t bytes;
+    uint32_t fp;                   /* huella del contenido subido */
+    int      fp_valid;
     int valid;
 } GpuTexSlot;
 static GpuTexSlot g_texcache[GE_TEXTURE_SLOTS];
@@ -238,6 +240,25 @@ static void texture_release(GpuTexSlot *t) {
     if (g_tex_bytes >= t->bytes) g_tex_bytes -= t->bytes;
     memset(t, 0, sizeof(*t));
 }
+/* Huella muestreada del contenido: si no cambia, no se vuelve a convertir ni
+ * subir (en hardware real la conversión por frame de 40+ texturas no da). */
+static uint32_t tex_fingerprint(const uint8_t *src, uint32_t srcbytes,
+                                const uint8_t *clut, uint32_t clutbytes) {
+    uint32_t h = 2166136261u ^ srcbytes;
+    if (srcbytes >= 4u) {
+        for (uint32_t i = 0; i < 24u; i++) {
+            const uint32_t off = (uint32_t)(((uint64_t)(srcbytes - 4u)) * i / 23u) & ~3u;
+            uint32_t v; memcpy(&v, src + off, 4);
+            h = (h ^ v) * 16777619u;
+        }
+    }
+    if (clut)
+        for (uint32_t i = 0; i + 4u <= clutbytes; i += 32u) {
+            uint32_t v; memcpy(&v, clut + i, 4);
+            h = (h ^ v) * 16777619u;
+        }
+    return h;
+}
 static int texture_upload(GpuTexSlot *t) {
     const uint32_t w = t->w, h = t->h;
     const int bpp = ge_tex_bpp((int)t->psm);
@@ -261,6 +282,13 @@ static int texture_upload(GpuTexSlot *t) {
                 pal_count * (cfmt == GE_PSM_8888 ? 4u : 2u));
         if (!clut) return 0;
     }
+    const uint32_t clutbytes = indexed ? pal_count * (cfmt == GE_PSM_8888 ? 4u : 2u) : 0u;
+    const uint32_t fp = tex_fingerprint(src, srcbytes, clut, clutbytes);
+    if (t->fp_valid && t->fp == fp) {       /* contenido sin cambios: no re-subir */
+        t->frame_loaded = S.frames;
+        g_tex_hits++;
+        return 1;
+    }
     ge_tex_image img = {0};
     if (ge_tex_decode(src, (int)w, (int)h, (int)t->psm, pitch, clut, (int)cfmt,
         (int)((t->clut_cfg >> 2) & 31u), (int)((t->clut_cfg >> 8) & 255u),
@@ -274,6 +302,8 @@ static int texture_upload(GpuTexSlot *t) {
     C3D_TexFlush(&t->tex);
     free(pica);
     ge_tex_free(&img);
+    t->fp = fp;
+    t->fp_valid = 1;
     t->frame_loaded = S.frames;
     g_tex_uploads++;
     return 1;

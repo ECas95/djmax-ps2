@@ -97,13 +97,36 @@ static void ndsp_cb(void *ud) {
     }
 }
 
-/* libctru lee el componente DSP de sdmc:/3ds/dspfirm.cdc; el HLE del emulador
- * no mira su contenido, solo hace falta que el archivo exista. */
+/* libctru lee el componente DSP de sdmc:/3ds/dspfirm.cdc. El HLE del emulador
+ * ignora su contenido; el DSP real NO: un dummy en consola rompe el audio. */
+static int is_emulator(void) {
+    s64 out = 0;
+    return R_SUCCEEDED(svcGetSystemInfo(&out, 0x20000, 0));   /* Citra/Azahar */
+}
+static int dspfirm_is_dummy(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    uint8_t b[64] = {1};
+    const size_t n = fread(b, 1, sizeof b, f);
+    fclose(f);
+    for (size_t i = 0; i < n; i++) if (b[i]) return 0;
+    return 1;                       /* todo ceros: lo escribimos nosotros */
+}
 static void ensure_dspfirm(void) {
-    FILE *f = fopen("sdmc:/3ds/dspfirm.cdc", "rb");
+    const char *path = "sdmc:/3ds/dspfirm.cdc";
+    const int emu = is_emulator();
+    if (!emu && dspfirm_is_dummy(path)) {
+        remove(path);
+        psp_printf("[audio] dspfirm.cdc era un dummy del emulador: borrado.\n");
+    }
+    FILE *f = fopen(path, "rb");
     if (f) { fclose(f); return; }
+    if (!emu) {
+        psp_printf("[audio] FALTA sdmc:/3ds/dspfirm.cdc: dumpea el DSP con la app DSP1.\n");
+        return;                     /* ndspInit fallara: juego mudo pero estable */
+    }
     mkdir("sdmc:/3ds", 0777);
-    f = fopen("sdmc:/3ds/dspfirm.cdc", "wb");
+    f = fopen(path, "wb");
     if (!f) return;
     static const uint8_t z[256];
     for (int i = 0; i < 64; i++) fwrite(z, 1, sizeof z, f);

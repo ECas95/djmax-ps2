@@ -13,6 +13,7 @@
 param(
     [string]$DevkitPro = $(if ($env:DEVKITPRO -match '^[A-Za-z]:[\\/]') { $env:DEVKITPRO } else { 'C:\devkitPro' }),
     [int]$Jobs = 8,
+    [ValidateSet('O2','Os')][string]$Opt = 'O2',
     [switch]$Clean,
     [switch]$Instrumented,
     [switch]$NoPackage
@@ -24,7 +25,7 @@ $ParentDir = Split-Path -Parent $Port
 # Supports both .../port/3ds and a standalone .../3ds from this ZIP.
 $Root = if ((Split-Path $ParentDir -Leaf) -eq 'port') { Split-Path -Parent $ParentDir } else { $ParentDir }
 $Build  = if ($Instrumented) { Join-Path $Port 'build\inst' } else { Join-Path $Port 'build' }
-$Obj    = Join-Path $Build 'obj'
+$Obj    = Join-Path $Build "obj-$Opt"
 $Emit   = Join-Path $Root 'build\emit'
 $Corpus = if ($Instrumented) { Join-Path $Build 'src' } elseif (Test-Path (Join-Path $Build 'emit_ovr')) { Join-Path $Build 'emit_ovr' } elseif (Test-Path (Join-Path $Build 'emit_ovr_off')) { Join-Path $Build 'emit_ovr_off' } else { $Emit }
 $Eboot  = Join-Path $Root 'build\eboot_reloc.bin'
@@ -74,7 +75,9 @@ if ($Instrumented -and -not (Test-Path (Join-Path $Corpus 'djmax_funcs_000.c')))
 }
 
 $arch   = @('-march=armv6k','-mtune=mpcore','-mfloat-abi=hard','-mtp=soft','-mword-relocations')
-$cflags = @('-Os','-g','-ffunction-sections','-fdata-sections','-fno-strict-aliasing',
+# O2: para .cia/.3ds (NCCH; mas rapido en consola). Os: para .3dsx (el loader
+# 3dsx de Citra/Azahar rechaza el binario O2; el de consola no esta verificado).
+$cflags = @("-$Opt",'-fomit-frame-pointer','-g','-ffunction-sections','-fdata-sections','-fno-strict-aliasing',
             '-fno-common','-w','-D__3DS__','-DPSPRECOMP_TRACE')
 $incs   = @("-I$Port", "-I$Port\include", "-I$Corpus", "-I$(Join-Path $Ctru 'include')", "-I$Build")
 if ($Instrumented) { $incs += "-include"; $incs += (Join-Path $Port 'probe_3ds.h') }

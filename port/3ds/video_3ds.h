@@ -14,6 +14,9 @@ void video_present(uint32_t guest_fb);
 /* Console sink used by psp_printf (runtime_3ds.c): bottom screen + sdmc log. */
 void psp_console_write(const char *s);
 
+/* Vuelca el buffer del log a la SD (llamado 1 vez/seg desde el frame loop). */
+void video_log_flush(void);
+
 uint32_t video_frames(void);
 int  video_log_ok(void);
 
