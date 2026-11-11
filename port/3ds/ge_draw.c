@@ -15,6 +15,7 @@
 #include <3ds.h>
 #include <citro3d.h>
 #include <stdio.h>
+#include <sys/stat.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -297,6 +298,27 @@ static int texture_upload(GpuTexSlot *t) {
         (int)((t->clut_cfg >> 2) & 31u), (int)((t->clut_cfg >> 8) & 255u),
         (int)cstart, (int)t->swizzle, &img) != 0) {
         return 0;
+    }
+    {   /* TEMP [texdump]: con sdmc:/djmx_texdump.flag vuelca cada textura única
+         * (arte intacto, antes del colorkey) a sdmc:/ge/tex/ para extraccion. */
+        static int want = -1;
+        if (want < 0) {
+            FILE *f = fopen("sdmc:/djmx_texdump.flag", "rb");
+            want = f != NULL;
+            if (f) { fclose(f); mkdir("sdmc:/ge", 0777); mkdir("sdmc:/ge/tex", 0777); }
+        }
+        if (want) {
+            static uint32_t seen[512]; static int nseen; static int files;
+            int dup = 0;
+            for (int i = 0; i < nseen; i++) if (seen[i] == fp) { dup = 1; break; }
+            if (!dup && nseen < 512 && files < 400) {
+                seen[nseen++] = fp;
+                char path[96];
+                snprintf(path, sizeof path, "sdmc:/ge/tex/%08X_%ux%u_%08X.png",
+                         t->addr, w, h, fp);
+                if (ge_tex_dump_png(path, &img) == 0) files++;
+            }
+        }
     }
     /* PSP color test (GU_NOTEQUAL): los texels que casan con la clave no se
      * dibujan. PICA no tiene color-key: se vacían en la textura (RGBA=0, que
