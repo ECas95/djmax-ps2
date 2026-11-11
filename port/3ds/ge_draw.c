@@ -16,6 +16,7 @@
 #include <citro3d.h>
 #include <stdio.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -317,6 +318,38 @@ static int texture_upload(GpuTexSlot *t) {
                 snprintf(path, sizeof path, "sdmc:/ge/tex/%08X_%ux%u_%08X.png",
                          t->addr, w, h, fp);
                 if (ge_tex_dump_png(path, &img) == 0) files++;
+            }
+        }
+    }
+    {   /* Texture packs: sdmc:/djmax/tex/<FP>.rgba (RGBA8 crudo, WxH exactos)
+         * reemplaza el arte decodificado. La huella es de CONTENIDO fuente:
+         * estable entre corridas y ajena a la direccion de carga. */
+        static int want = -1;
+        if (want < 0) {
+            DIR *d = opendir("sdmc:/djmax/tex");
+            want = d != NULL;
+            if (d) closedir(d);
+        }
+        if (want) {
+            static uint32_t neg[128]; static int negn;   /* huellas sin override */
+            int miss = 0;
+            for (int i = 0; i < negn; i++) if (neg[i] == fp) { miss = 1; break; }
+            if (!miss) {
+                char path[80];
+                snprintf(path, sizeof path, "sdmc:/djmax/tex/%08X.rgba", fp);
+                FILE *f = fopen(path, "rb");
+                if (f) {
+                    const size_t need = (size_t)w * h * 4u;
+                    if (fread(img.rgba, 1, need, f) == need) {
+                        static uint32_t ov_logs;
+                        if (ov_logs < 8u) { ov_logs++;
+                            psp_printf("[tex] override %08X (%ux%u)\n", fp, w, h); }
+                    }
+                    fclose(f);
+                } else {
+                    neg[negn & 127] = fp;
+                    if (negn < 127) negn++;
+                }
             }
         }
     }
