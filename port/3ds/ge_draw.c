@@ -907,11 +907,19 @@ static void prim_run(uint32_t prim_pc, uint32_t arg) {
         (cc.bbox[0] > 260 || cc.bbox[2] < 220);
     g_route = (g_bottom && g_split > 0 && g_gear_seen && !anim_bga && !lateral_bga) ? 1 : 0;
     if (got >= 2u) {
-        S.submitted++;
-        if (cc.tex_on) S.textured++;
-        if (type == 6u) prim_sprites(tmp, got, &cc);
-        else prim_tris(tmp, got, type);
-        if (g_vn > 0) g_guest_vertices_this_frame += (uint32_t)g_vn;
+        /* Textura pedida pero degenerada (addr 0): la PSP muestrea negro con
+         * alpha 0 y el alpha-test GREATER 0 lo descarta entero. No dibujar
+         * (el telón del gear es esto; solo sirve como pivote de ruta). */
+        if (cc.tex_on && tex_degenerate) {
+            S.other++;
+            cc.status = "TEX_DEGENERATE_SKIP";
+        } else {
+            S.submitted++;
+            if (cc.tex_on) S.textured++;
+            if (type == 6u) prim_sprites(tmp, got, &cc);
+            else prim_tris(tmp, got, type);
+            if (g_vn > 0) g_guest_vertices_this_frame += (uint32_t)g_vn;
+        }
     } else {
         S.other++;
         cc.status = "NO_VERTS";
