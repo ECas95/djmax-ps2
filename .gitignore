@@ -1,4 +1,5 @@
 # Local game dumps and every generated artifact
+.game
 .game/
 .emu/
 .ps2/
@@ -33,3 +34,14 @@ PS2_DATA/
 *.bak
 __pycache__/
 *.pyc
+
+# 3DS build artifacts (never ship: they embed EBOOT segments)
+*.3dsx
+*.cia
+*.3ds
+*.smdh
+*.bnr
+*.icn
+*.cdc
+*.shbin
+*.map

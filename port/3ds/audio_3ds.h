@@ -1,0 +1,21 @@
+/* audio_3ds.h -- salida de audio real (ndsp) para los canales sceAudio del PSP. */
+#ifndef DJMX_3DS_AUDIO_H
+#define DJMX_3DS_AUDIO_H
+
+#include <stdint.h>
+
+#define PS2_AUDIO_CH 8          /* canales de usuario del PSP */
+
+void ps2_audio_install(void);   /* arranca ndsp; si falta dspfirm crea uno dummy */
+void ps2_audio_fini(void);
+int  ps2_audio_ok(void);
+
+/* FIFO por canal, en frames estéreo s16 a 44100 Hz. */
+uint32_t ps2_audio_level(int ch);                              /* frames en cola */
+void     ps2_audio_push(int ch, const int16_t *lr, uint32_t frames);
+void     ps2_audio_reset(int ch);
+
+uint64_t ps2_time_us(void);
+void ps2_audio_preempt(void);
+
+#endif
