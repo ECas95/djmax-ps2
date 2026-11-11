@@ -49,13 +49,11 @@ void ps2_audio_wait_until(uint64_t when_us) {
     for (;;) {
         if (g_pump) g_pump();
         ps2_sched_yield();
-        if (ps2_time_us() >= when_us) break;
-        if ((++spins & 15u) == 0u) {
-            const uint64_t now = ps2_time_us();
-            uint64_t ns = (when_us - now) * 1000ull;
-            if (ns > 300000ull) ns = 300000ull;            /* 0.3 ms */
-            svcSleepThread((s64)ns);
-        }
+        const uint64_t now = ps2_time_us();
+        if (now >= when_us) break;
+        /* dormir solo en esperas largas: las de 1 grano (5.8 ms) van por yields */
+        if ((++spins & 31u) == 0u && when_us - now > 2000u)
+            svcSleepThread(300000);
     }
     g_await[slot] = 0;
     g_nwait--;
@@ -63,12 +61,9 @@ void ps2_audio_wait_until(uint64_t when_us) {
 
 void ps2_audio_preempt(void) {
     if (!g_nwait) return;
-    static uint64_t last;
     const uint64_t now = ps2_time_us();
-    if (now - last < 400u) return;                         /* como mucho cada 0.4 ms */
     for (int i = 0; i < AWAIT_MAX; i++)
         if (g_await[i] && g_await[i] <= now) {
-            last = now;
             g_preempt_fires++;
             ps2_sched_yield();
             return;

@@ -28,8 +28,10 @@
     GX_TRANSFER_RAW_COPY(0) | GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | \
     GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 static C3D_RenderTarget *g_pica_target;
+static C3D_RenderTarget *g_pica_bottom;
 static int g_pica_ready;
 void *video_pica_target(void) { return g_pica_target; }
+void *video_pica_bottom(void) { return g_pica_bottom; }
 int video_pica_ready(void) { return g_pica_ready; }
 
 static int      g_ready;
@@ -39,9 +41,15 @@ static uint32_t g_frames;
 
 void video_init(void) {
     gfxInitDefault();
-    consoleInit(GFX_BOTTOM, NULL);
-    /* Citro3D manages the top-screen swap/presentation itself. */
-    gfxSetDoubleBuffering(GFX_BOTTOM, false);
+    /* Con el flag, la inferior es la consola de debug; sin él es un segundo
+     * target GPU (gear en gameplay, logo en menús). */
+    FILE *conflag = fopen("sdmc:/djmx_console.flag", "rb");
+    const int want_console = conflag != NULL;
+    if (conflag) fclose(conflag);
+    if (want_console) {
+        consoleInit(GFX_BOTTOM, NULL);
+        gfxSetDoubleBuffering(GFX_BOTTOM, false);
+    }
     g_pica_ready = C3D_Init(C3D_DEFAULT_CMDBUF_SIZE) ? 1 : 0;
     if (g_pica_ready) {
         g_pica_target = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
@@ -50,6 +58,11 @@ void video_init(void) {
         } else {
             C3D_Fini();
             g_pica_ready = 0;
+        }
+        if (g_pica_ready && !want_console) {
+            g_pica_bottom = C3D_RenderTargetCreate(240, 320, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+            if (g_pica_bottom)
+                C3D_RenderTargetSetOutput(g_pica_bottom, GFX_BOTTOM, GFX_LEFT, PICA_DISPLAY_FLAGS);
         }
     }
 
@@ -74,6 +87,7 @@ void video_init(void) {
 void video_shutdown(void) {
     if (g_log) { fflush(g_log); fclose(g_log); g_log = NULL; g_log_ok = 0; }
     fsExit();
+    if (g_pica_bottom) { C3D_RenderTargetDelete(g_pica_bottom); g_pica_bottom = NULL; }
     if (g_pica_target) { C3D_RenderTargetDelete(g_pica_target); g_pica_target = NULL; }
     if (g_pica_ready) { C3D_Fini(); g_pica_ready = 0; }
     gfxExit();

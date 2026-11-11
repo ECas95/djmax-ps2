@@ -237,8 +237,9 @@ $objs = New-Object System.Collections.Generic.List[string]
 foreach ($src in $sources) {
     $base = [IO.Path]::GetFileNameWithoutExtension($src)
     $objPath = Join-Path $Obj "$base.o"
-    if (-not (Test-Path $objPath)) {
-        Write-Host ("retry   {0}" -f (Split-Path $src -Leaf)) -ForegroundColor Yellow
+    $stale = (Test-Path $objPath) -and ((Get-Item $objPath).LastWriteTime -lt (Get-Item $src).LastWriteTime)
+    if (-not (Test-Path $objPath) -or $stale) {
+        Write-Host ("retry   {0}{1}" -f (Split-Path $src -Leaf), $(if ($stale) { ' (stale)' } else { '' })) -ForegroundColor Yellow
         $errFile = Join-Path $Obj "$base.err"
         $eap = $ErrorActionPreference
         $ErrorActionPreference = 'SilentlyContinue'

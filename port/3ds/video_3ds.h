@@ -21,6 +21,9 @@ uint32_t video_frames(void);
 int  video_log_ok(void);
 
 /* Citro3D owns the top screen when active. Never overwrite it with gfx framebuffer writes. */
+/* PICA render targets: superior (siempre) e inferior (NULL si la consola de
+ * debug está activa vía sdmc:/djmx_console.flag). */
 void *video_pica_target(void);
+void *video_pica_bottom(void);
 int video_pica_ready(void);
 #endif

@@ -82,10 +82,19 @@ static ge_census_call g_census[GE_CENSUS_MAX];
 static int g_census_n;
 
 static int g_magenta = 1;
-static void *g_target;            /* C3D_RenderTarget* */
+static void *g_target;            /* C3D_RenderTarget* superior */
+static void *g_bottom;            /* C3D_RenderTarget* inferior (puede ser NULL) */
 static uint32_t g_clear = 0x000000FFu;
 static int g_frame_open;
 static int g_ready;
+static int g_route;               /* 0 = superior, 1 = inferior (por batch) */
+static int g_split;               /* frames restantes de modo dual (BGA arriba) */
+static int g_gear_seen;           /* ya pasó el chasis del gear en este frame */
+static C3D_Mtx g_mtx_bot;
+static C3D_Mtx g_mtx_split;       /* encuadre del gear en gameplay */
+static float g_split_cx = 240.0f;
+static C3D_Tex g_logo;            /* logo de la inferior en menús */
+static int g_logo_ready;
 
 static Vtx *g_vb;
 static int g_vn, g_vbase; /* never reuse submitted memory within one GPU frame */
@@ -99,6 +108,7 @@ typedef struct {
     uint32_t fp;                   /* huella del contenido subido */
     uint32_t ckey;                 /* color test: clave RGB o 0xFFFFFFFF off */
     uint32_t cmask;
+    uint32_t last_change;          /* frame del último cambio de contenido (video) */
     int      fp_valid;
     int valid;
 } GpuTexSlot;
@@ -218,9 +228,10 @@ static int vtx_read(uint32_t a, uint32_t vt, Vtx *o, int *has_uv) {
         sx = cx / cw * f24(g_r[0x42]) + f24(g_r[0x45]) - (float)(g_r[0x4C] & 0xFFFFu) / 16.0f;
         sy = cy / cw * f24(g_r[0x43]) + f24(g_r[0x46]) - (float)(g_r[0x4D] & 0xFFFFu) / 16.0f;
     }
-    /* PSP 480x272 (y down) -> canvas 400x226.7 with letterbox */
-    o->x = sx * (CANVAS_W / PSP_W);
-    o->y = sy * (CANVAS_W / PSP_W) + LETTERBOX;
+    /* Coordenadas en espacio PSP (480x272): el mapeo a cada pantalla vive en
+     * la matriz ortográfica del target (superior o inferior). */
+    o->x = sx;
+    o->y = sy;
     o->z = 0.5f;
     if (g_magenta) {
         o->r = 1.0f; o->g = 0.0f; o->b = 1.0f; o->a = 1.0f;
@@ -369,6 +380,7 @@ static int texture_upload(GpuTexSlot *t) {
     free(pica);
     ge_tex_free(&img);
     t->fp = fp;
+    if (t->fp_valid) t->last_change = S.frames;   /* contenido cambió: textura de video */
     t->fp_valid = 1;
     t->frame_loaded = S.frames;
     g_tex_uploads++;
@@ -472,11 +484,15 @@ static GpuTexSlot *texture_get(void) {
 /* ---- draw buffer ---------------------------------------------------------- */
 static void flush(void) {
     if (!g_vn || !g_ready || !g_frame_open) { g_vn = 0; return; }
+    C3D_RenderTarget *rt = (C3D_RenderTarget *)((g_route && g_bottom) ? g_bottom : g_target);
+    C3D_FrameDrawOn(rt);
     C3D_BufInfo *bi = C3D_GetBufInfo();
     BufInfo_Init(bi);
     BufInfo_Add(bi, g_vb, sizeof(Vtx), 3, 0x210);
     GSPGPU_FlushDataCache(&g_vb[g_vbase], (size_t)g_vn * sizeof(Vtx));
-    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_uproj, &g_mtx);
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_uproj,
+                     (g_route && g_bottom) ? (g_split > 0 ? &g_mtx_split : &g_mtx_bot)
+                                           : &g_mtx);
     C3D_DrawArrays(GPU_TRIANGLES, g_vbase, g_vn);
     g_vbase += g_vn;
     g_vn = 0;
@@ -547,8 +563,11 @@ static void preview_draw(void) {
 static void frame_begin(void) {
     if (g_frame_open || !g_ready || !g_target) return;
     g_vbase = g_vn = 0;
+    g_route = 0;
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
     C3D_RenderTargetClear((C3D_RenderTarget *)g_target, C3D_CLEAR_ALL, g_clear, 0);
+    if (g_bottom)
+        C3D_RenderTargetClear((C3D_RenderTarget *)g_bottom, C3D_CLEAR_ALL, 0x000000FFu, 0);
     C3D_FrameDrawOn((C3D_RenderTarget *)g_target);
     g_frame_open = 1;
 }
@@ -777,6 +796,7 @@ static void prim_run(uint32_t prim_pc, uint32_t arg) {
                        cc.tex_addr, cc.tex_w, cc.tex_h, cc.tex_psm, cc.tex_stride,
                        (g_r[0xB0] & 0xFFFFFFu) | ((g_r[0xB1] & 0x0F0000u) << 8)); }
     }
+    /* Dual-screen: la ruta se decide tras leer los vértices (ver bbox abajo). */
     if (texture) C3D_TexBind(0, &texture->tex);
     C3D_TexEnv *env = C3D_GetTexEnv(0);
     C3D_TexEnvInit(env);
@@ -848,6 +868,26 @@ static void prim_run(uint32_t prim_pc, uint32_t arg) {
         if (sy > cc.bbox[3]) cc.bbox[3] = sy;
     }
     if (cc.bbox[0] == 0x7FFFFFFF) { cc.bbox[0] = cc.bbox[1] = cc.bbox[2] = cc.bbox[3] = 0; }
+    /* Gameplay: el chasis del gear es el primer draw alto (≥230) y angosto
+     * (≤340) del frame. El BGA se dibuja antes (arriba); gear/notas/HUD van
+     * después (abajo). El modo dual queda armado 60 frames. */
+    if (g_bottom && !g_gear_seen && cc.tex_on && got >= 2u) {
+        const int bw = cc.bbox[2] - cc.bbox[0], bh = cc.bbox[3] - cc.bbox[1];
+        /* el chasis cruza el centro; sprites BGA laterales (p.ej. personajes) no */
+        if (bh >= 230 && bw >= 40 && bw <= 340 &&
+            cc.bbox[0] <= 260 && cc.bbox[2] >= 220) {
+            g_gear_seen = 1; g_split = 60;
+            float cx = 0.5f * (float)(cc.bbox[0] + cc.bbox[2]);
+            if (cx < 181.33f) cx = 181.33f;
+            if (cx > 298.67f) cx = 298.67f;
+            if (cx > g_split_cx + 4.0f || cx < g_split_cx - 4.0f) {
+                g_split_cx = cx;
+                Mtx_OrthoTilt(&g_mtx_split, cx - 181.33f, cx + 181.33f,
+                              PSP_H, 0.0f, 0.0f, 1.0f, true);
+            }
+        }
+    }
+    g_route = (g_bottom && g_split > 0 && g_gear_seen) ? 1 : 0;
     if (got >= 2u) {
         S.submitted++;
         if (cc.tex_on) S.textured++;
@@ -951,6 +991,7 @@ void ge_draw_print_hist(void) {
 
 /* ---- public API ----------------------------------------------------------- */
 void ge_draw_set_target(void *target) { g_target = target; }
+void ge_draw_set_bottom(void *target) { g_bottom = target; }
 void ge_draw_set_clear(uint32_t rgba) { g_clear = rgba; }
 void ge_draw_set_magenta(int on) { g_magenta = on ? 1 : 0; }
 int  ge_draw_magenta(void) { return g_magenta; }
@@ -1011,10 +1052,36 @@ void ge_draw_init(void) {
     C3D_CullFace(GPU_CULL_NONE);
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
 
-    /* The top LCD is rotated in GPU space; the standard 3DS projection is tilt. */
-    Mtx_OrthoTilt(&g_mtx, 0.0f, CANVAS_W, CANVAS_H, 0.0f, 0.0f, 1.0f, true);
+    /* The top LCD is rotated in GPU space; the standard 3DS projection is tilt.
+     * Ortográficas en espacio PSP: la superior (400px) muestra 480x288 con
+     * letterbox de 8 unidades; la inferior (320px) 480x360 con margen de 44. */
+    Mtx_OrthoTilt(&g_mtx, 0.0f, PSP_W, PSP_H + 8.0f, -8.0f, 0.0f, 1.0f, true);
+    Mtx_OrthoTilt(&g_mtx_bot, 0.0f, PSP_W, PSP_H + 44.0f, -44.0f, 0.0f, 1.0f, true);
+    /* inferior en split: 362.6x272 PSP (320x240 a escala 0.882) centrado en el gear */
+    Mtx_OrthoTilt(&g_mtx_split, g_split_cx - 181.33f, g_split_cx + 181.33f,
+                  PSP_H, 0.0f, 0.0f, 1.0f, true);
     g_ready = 1;
     preview_init();
+    {   /* logo de la pantalla inferior (menús): RGBA8 crudo 512x128 */
+        FILE *f = fopen("sdmc:/djmax/tex/bottom_logo.rgba", "rb");
+        if (f) {
+            const size_t need = 512u * 128u * 4u;
+            uint32_t *px = (uint32_t *)malloc(need);
+            uint8_t  *pica = (uint8_t *)malloc(need);
+            if (px && pica && fread(px, 1, need, f) == need &&
+                C3D_TexInit(&g_logo, 512, 128, GPU_RGBA8)) {
+                ge_tex_image img = { px, 512, 128 };
+                ge_tex_to_pica_rgba8(&img, pica);
+                C3D_TexUpload(&g_logo, pica);
+                C3D_TexFlush(&g_logo);
+                C3D_TexSetFilter(&g_logo, GPU_LINEAR, GPU_LINEAR);
+                g_logo_ready = 1;
+                psp_printf("[gfx] logo inferior cargado\n");
+            }
+            free(px); free(pica);
+            fclose(f);
+        }
+    }
 }
 
 void ge_draw_frame(uint32_t fb, uint32_t sync) {
@@ -1023,6 +1090,28 @@ void ge_draw_frame(uint32_t fb, uint32_t sync) {
        can remain on-screen and disguise a guest command-list failure. */
     if (!g_frame_open) frame_begin();
     if (g_force_preview || !g_guest_vertices_this_frame) preview_draw();
+    if (g_split > 0) g_split--;
+    g_gear_seen = 0;
+    if (g_bottom && g_split == 0 && g_logo_ready && g_frame_open) {
+        flush();
+        g_route = 1;                       /* logo centrado en la inferior */
+        C3D_TexBind(0, &g_logo);
+        C3D_TexEnv *env = C3D_GetTexEnv(0);
+        C3D_TexEnvInit(env);
+        C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, 0, 0);
+        C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
+                       GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA,
+                       GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA);
+        C3D_AlphaTest(false, GPU_ALWAYS, 0);
+        const Vtx l0 = {  60, 91, 0.5f, 0, 1, 1, 1, 1, 1 };
+        const Vtx l1 = { 420, 91, 0.5f, 1, 1, 1, 1, 1, 1 };
+        const Vtx l2 = { 420, 181, 0.5f, 1, 0, 1, 1, 1, 1 };
+        const Vtx l3 = {  60, 181, 0.5f, 0, 0, 1, 1, 1, 1 };
+        tri(&l0, &l1, &l2); tri(&l0, &l2, &l3);
+        flush();
+        g_route = 0;
+    }
     frame_end();
     g_guest_vertices_this_frame = 0;
     S.frames++;
