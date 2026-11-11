@@ -25,6 +25,8 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <dirent.h>
+#include <errno.h>
 uint32_t ps2_vpl_base(uint32_t uid);
 #include <stdio.h>
 #include <fcntl.h>
@@ -715,16 +717,65 @@ static int io_alloc(int host_fd, uint32_t size) {
  * The base game has no overlay, so ovl_fd stays -1 for every open. */
 #define DJMX_SD_ROOT "sdmc:/djmax/"
 
+/* Raíz del juego en la SD: acepta las variantes típicas de copia y, si no hay
+ * ninguna, lista en pantalla lo que sí existe (en consola real la causa más
+ * común de "no arranca" es la SD mal copiada). */
+static const char *io_sd_root(void) {
+    static const char *ok;
+    if (ok) return ok;
+    static const char *cand[] = {
+        "sdmc:/djmax/", "sdmc:/DJMAX/", "sdmc:/djmax/djmax/", "sdmc:/",
+    };
+    for (unsigned i = 0; i < sizeof cand / sizeof cand[0]; i++) {
+        char probe[96];
+        snprintf(probe, sizeof probe, "%sPSP_GAME/USRDIR", cand[i]);
+        struct stat st;
+        if (stat(probe, &st) == 0) {
+            ok = cand[i];
+            psp_printf("[io] raiz del juego: %s\n", ok);
+            return ok;
+        }
+    }
+    static uint32_t miss;
+    if ((miss++ % 600u) == 0u) {
+        psp_printf("[io] ERROR: no encuentro PSP_GAME en la SD.\n");
+        psp_printf("[io] Copia tu juego a sdmc:/djmax/PSP_GAME/...\n");
+        DIR *d = opendir("sdmc:/djmax");
+        const char *shown = "sdmc:/djmax";
+        if (!d) { d = opendir("sdmc:/"); shown = "sdmc:/"; }
+        if (d) {
+            psp_printf("[io] contenido de %s:\n", shown);
+            struct dirent *e;
+            int n = 0;
+            while ((e = readdir(d)) != NULL && n < 10) {
+                psp_printf("[io]   %s\n", e->d_name);
+                n++;
+            }
+            if (!n) psp_printf("[io]   (vacio)\n");
+            closedir(d);
+        } else {
+            psp_printf("[io] no puedo leer la SD (sdmc sin montar, errno=%d)\n", errno);
+        }
+    }
+    return NULL;
+}
+
 static int io_host_open(const char *p, uint32_t *size) {
     char hp[256];
     p += 6;                                 /* "disc0:" */
     while (*p == '/') p++;
-    snprintf(hp, sizeof hp, DJMX_SD_ROOT "%s", p);
+    const char *root = io_sd_root();
+    if (!root) return -1;
+    snprintf(hp, sizeof hp, "%s%s", root, p);
     const int hf = open(hp, O_RDONLY);
-    if (hf >= 0) {
-        *size = (uint32_t)lseek(hf, 0, SEEK_END);
-        lseek(hf, 0, SEEK_SET);
+    if (hf < 0) {
+        static uint32_t elogs;
+        if (elogs < 6) { elogs++;
+            psp_printf("[io] open('%s') fallo errno=%d\n", hp, errno); }
+        return hf;
     }
+    *size = (uint32_t)lseek(hf, 0, SEEK_END);
+    lseek(hf, 0, SEEK_SET);
     return hf;
 }
 
@@ -1993,6 +2044,7 @@ static void hle_UtilitySaveInit(void) {
             uint32_t n = datasize ? datasize : bufsize;
             if (n > bufsize && bufsize) n = bufsize;
             const void *src = databuf ? psp_mem_ptr(databuf, n) : NULL;
+            mkdir("sdmc:/djmax", 0777);
             mkdir("sdmc:/djmax/SAVE", 0777);
             FILE *f = fopen(path, "wb");
             if (!f || !src) result = 0x80110383u;              /* access error */
