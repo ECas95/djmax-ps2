@@ -16,6 +16,7 @@
 #include <sys/stat.h>
 
 #include "audio_3ds.h"
+#include "sched_3ds.h"
 
 void psp_printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
@@ -24,7 +25,55 @@ uint64_t ps2_time_us(void) {
     return (uint64_t)svcGetSystemTick() * 1000000ull / 268123480ull;
 }
 
-void ps2_audio_preempt(void) { }
+/* ---- esperas con deadline (modelo del port PS2) ---------------------------
+ * Un hilo de audio del PSP preempta al juego cuando vence su espera; aquí el
+ * cambio solo puede ocurrir en una llamada HLE (ps2_audio_preempt) o cuando
+ * el que espera cede (ps2_audio_wait_until). */
+#define AWAIT_MAX 16
+static uint64_t g_await[AWAIT_MAX];
+static int      g_nwait;
+static void   (*g_pump)(void);
+
+void ps2_audio_set_pump(void (*fn)(void)) { g_pump = fn; }
+
+static uint32_t g_preempt_fires, g_wait_calls;
+void ps2_audio_diag(uint32_t *fires, uint32_t *waits) { *fires = g_preempt_fires; *waits = g_wait_calls; }
+
+void ps2_audio_wait_until(uint64_t when_us) {
+    g_wait_calls++;
+    int slot = 0;
+    while (slot < AWAIT_MAX - 1 && g_await[slot]) slot++;
+    g_await[slot] = when_us;
+    g_nwait++;
+    uint32_t spins = 0;
+    for (;;) {
+        if (g_pump) g_pump();
+        ps2_sched_yield();
+        if (ps2_time_us() >= when_us) break;
+        if ((++spins & 15u) == 0u) {
+            const uint64_t now = ps2_time_us();
+            uint64_t ns = (when_us - now) * 1000ull;
+            if (ns > 300000ull) ns = 300000ull;            /* 0.3 ms */
+            svcSleepThread((s64)ns);
+        }
+    }
+    g_await[slot] = 0;
+    g_nwait--;
+}
+
+void ps2_audio_preempt(void) {
+    if (!g_nwait) return;
+    static uint64_t last;
+    const uint64_t now = ps2_time_us();
+    if (now - last < 400u) return;                         /* como mucho cada 0.4 ms */
+    for (int i = 0; i < AWAIT_MAX; i++)
+        if (g_await[i] && g_await[i] <= now) {
+            last = now;
+            g_preempt_fires++;
+            ps2_sched_yield();
+            return;
+        }
+}
 
 #define FIFO_FRAMES 16384u              /* potencia de 2; ~0.37 s por canal */
 #define CHUNK       1024u               /* frames por wave buffer (~23 ms) */

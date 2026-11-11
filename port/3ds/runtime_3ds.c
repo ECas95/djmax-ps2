@@ -522,6 +522,7 @@ void psp_hle_call(uint32_t nid) {
     /* A PSP audio thread preempts the game when its wait is over. Here the switch can
      * only happen at a firmware call: during loading between screens user_main makes
      * many (file reads) and the sound threads would otherwise wait for the whole load. */
+    { extern void ps2_audio_preempt(void); ps2_audio_preempt(); }
     hle_rec *rec = &g_ring[g_ring_n++ & 31u];
     rec->nid = nid;
     rec->a0 = psp_cpu.r[PSP_REG_A0];

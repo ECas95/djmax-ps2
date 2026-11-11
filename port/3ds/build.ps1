@@ -32,6 +32,7 @@ $Eboot  = Join-Path $Root 'build\eboot_reloc.bin'
 
 $Dka    = Join-Path $DevkitPro 'devkitARM'
 $Gcc    = Join-Path $Dka 'bin\arm-none-eabi-gcc.exe'
+$Gpp    = Join-Path $Dka 'bin\arm-none-eabi-g++.exe'
 $Ctru   = Join-Path $DevkitPro 'libctru'
 $Xt     = Join-Path $DevkitPro 'tools\bin\3dsxtool.exe'
 $Smdh   = Join-Path $DevkitPro 'tools\bin\smdhtool.exe'
@@ -79,6 +80,12 @@ $arch   = @('-march=armv6k','-mtune=mpcore','-mfloat-abi=hard','-mtp=soft','-mwo
 # 3dsx de Citra/Azahar rechaza el binario O2; el de consola no esta verificado).
 $cflags = @("-$Opt",'-fomit-frame-pointer','-g','-ffunction-sections','-fdata-sections','-fno-strict-aliasing',
             '-fno-common','-w','-D__3DS__','-DPSPRECOMP_TRACE')
+# El decoder ATRAC (third_party/at3_standalone_src) es C++ sin excepciones/RTTI.
+$At3 = Join-Path $Root 'third_party\at3_standalone_src'
+if (-not (Test-Path $At3)) { $At3 = Join-Path $Root '..\..\third_party\at3_standalone_src' }
+if (-not (Test-Path $At3)) { Die "no se encuentra third_party/at3_standalone_src (decoder ATRAC)" }
+$cxxflags = @("-$Opt",'-fomit-frame-pointer','-g','-ffunction-sections','-fdata-sections','-fno-strict-aliasing',
+              '-fno-exceptions','-fno-rtti','-w','-D__3DS__',"-I$(Join-Path $Port 'at3_shim')","-I$At3")
 $incs   = @("-I$Port", "-I$Port\include", "-I$Corpus", "-I$(Join-Path $Ctru 'include')", "-I$Build")
 if ($Instrumented) { $incs += "-include"; $incs += (Join-Path $Port 'probe_3ds.h') }
 
@@ -133,7 +140,7 @@ $sources += Join-Path $Corpus 'djmax_register.c'
 $LocalImports = Join-Path $Corpus 'djmax_imports.c'
 if (-not (Test-Path $LocalImports)) { $LocalImports = Join-Path $Emit 'djmax_imports.c' }
 $sources += $LocalImports
-$plat = @('runtime_3ds.c','sched_3ds.c','hle_3ds.c','ps2_compat.c','ge_3ds.c',
+$plat = @('runtime_3ds.c','sched_3ds.c','hle_3ds.c','atrac_3ds.c','ps2_compat.c','ge_3ds.c',
           'video_3ds.c','audio_3ds.c','mpeg_3ds.c','imports_3ds.c','main.c')
 # video_stub.c envuelve el pump de video 0x8B230: solo aplica cuando el corpus
 # lo renombro a psp_real_0008B230 (emit_ovr); con el emit crudo ya existe.
@@ -154,6 +161,11 @@ foreach ($extra in @('ge_draw.c','ge_tex.c')) {
     $p = Join-Path $Port $extra
     if (Test-Path $p) { $sources += $p }
 }
+foreach ($cpp in @('atrac3.cpp','atrac.cpp','atrac3plus.cpp','atrac3plusdec.cpp','atrac3plusdsp.cpp',
+                   'compat.cpp','fft.cpp','get_bits.cpp','mem.cpp')) {
+    $sources += Join-Path $At3 $cpp
+}
+$sources += Join-Path $Port 'at3_3ds.cpp'
 $gt = Join-Path $Port 'ge_test'
 if (Test-Path $gt) { $sources += Get-ChildItem $gt -Filter '*.c' | ForEach-Object FullName }
 $sources += $asmPath
@@ -182,9 +194,11 @@ function Start-One($src) {
     if ((Test-Path $obj) -and ((Get-Item $obj).LastWriteTime -ge (Get-Item $src).LastWriteTime)) {
         return @{ Obj=$obj; Proc=$null; Err=$err; Src=$src; Skip=$true }
     }
-    $useFlags = if ($src.EndsWith('.S')) { @() } else { $common }
+    $isCpp = $src.EndsWith('.cpp')
+    $tool = if ($isCpp) { $Gpp } else { $Gcc }
+    $useFlags = if ($src.EndsWith('.S')) { @() } elseif ($isCpp) { $arch + $cxxflags } else { $common }
     $args = @() + $useFlags + @('-c',$src,'-o',$obj)
-    $p = Start-Process -FilePath $Gcc -ArgumentList (Join-QuotedArgs $args) -NoNewWindow -PassThru `
+    $p = Start-Process -FilePath $tool -ArgumentList (Join-QuotedArgs $args) -NoNewWindow -PassThru `
             -RedirectStandardError $err -RedirectStandardOutput (Join-Path $Obj "$base.out")
     return @{ Obj=$obj; Proc=$p; Err=$err; Src=$src; Skip=$false }
 }
@@ -228,8 +242,10 @@ foreach ($src in $sources) {
         $errFile = Join-Path $Obj "$base.err"
         $eap = $ErrorActionPreference
         $ErrorActionPreference = 'SilentlyContinue'
-        $useFlags = if ($src.EndsWith('.S')) { @() } else { $common }
-        & $Gcc @useFlags -c $src -o $objPath 2> $errFile
+        $isCpp = $src.EndsWith('.cpp')
+        $tool = if ($isCpp) { $Gpp } else { $Gcc }
+        $useFlags = if ($src.EndsWith('.S')) { @() } elseif ($isCpp) { $arch + $cxxflags } else { $common }
+        & $tool @useFlags -c $src -o $objPath 2> $errFile
         $ErrorActionPreference = $eap
         if (-not (Test-Path $objPath)) { $failed++ }
     }
@@ -248,7 +264,7 @@ $linkArgs = @('-specs=3dsx.specs','-g') + $arch + @(
     "-L$(Join-Path $Ctru 'lib')", '-lcitro2d', '-lcitro3d', '-lctru', '-lm'
 )
 $linkLog = Join-Path $Build 'link.log'
-$lp = Start-Process -FilePath $Gcc -ArgumentList (Join-QuotedArgs $linkArgs) -NoNewWindow -PassThru `
+$lp = Start-Process -FilePath $Gpp -ArgumentList (Join-QuotedArgs $linkArgs) -NoNewWindow -PassThru `
         -RedirectStandardError $linkLog -RedirectStandardOutput (Join-Path $Build 'link.out')
 $null = $lp.WaitForExit(600000)
 if (-not (Test-Path $elf) -or ((Get-Item $linkLog).Length -gt 0)) {

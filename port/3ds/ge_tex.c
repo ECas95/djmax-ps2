@@ -113,7 +113,7 @@ static void dxt_block(const uint8_t *b, int fmt, uint32_t *out, uint32_t pitch) 
 /* ---- decode --------------------------------------------------------------- */
 int ge_tex_decode(const uint8_t *src, int w, int h, int psm, uint32_t stride,
                   const uint8_t *clut, int clut_psm, int clut_shift, int clut_mask,
-                  int swizzled, ge_tex_image *out) {
+                  int clut_start, int swizzled, ge_tex_image *out) {
     if (!src || !out || w <= 0 || h <= 0 || w > 1024 || h > 1024) return -1;
     if (ge_tex_bpp(psm) == 0) return -2;
     if (!stride) stride = (uint32_t)w;
@@ -154,19 +154,24 @@ int ge_tex_decode(const uint8_t *src, int w, int h, int psm, uint32_t stride,
     uint8_t *row = (uint8_t *)malloc(aligned_row_bytes);
     if (!row) { free(rgba); return -1; }
 
-    /* CLUT palette for the indexed formats. */
-    uint32_t pal[256];
+    /* CLUT palette for the indexed formats. La base (bancos de 16 entradas,
+     * PPSSPP GetClutIndex) se aplica al índice: las skins del gear tintan
+     * elementos cambiando de banco sin recargar la paleta. */
+    uint32_t pal[1024];
     int n_pal = 0;
+    const uint32_t base = (uint32_t)(clut_start < 0 ? 0 : clut_start) << 4;
     if (psm == GE_PSM_T4) n_pal = 16;
     else if (psm == GE_PSM_T8 || psm == GE_PSM_T16) n_pal = 256;
     if (n_pal) {
+        const int total = n_pal + (int)base > 1024 ? 1024 : n_pal + (int)base;
         if (!clut) { free(row); free(rgba); return -3; }
-        for (int i = 0; i < n_pal; i++) {
+        for (int i = 0; i < total; i++) {
             const uint32_t v = (clut_psm == GE_PSM_8888)
                 ? ((const uint32_t *)clut)[i]
                 : ((const uint16_t *)clut)[i];
             pal[i] = decode_texel(clut_psm, v);
         }
+        n_pal = total;
     }
     if (psm == GE_PSM_T32) { free(row); free(rgba); return -2; }  /* needs 1024-entry CLUT */
 
@@ -188,12 +193,12 @@ int ge_tex_decode(const uint8_t *src, int w, int h, int psm, uint32_t stride,
             case GE_PSM_T4: {
                 const uint32_t byte = row[x >> 1];
                 const uint32_t idx = (byte >> ((x & 1) ? 4 : 0)) & 15u;
-                v = pal[((idx >> sh) & mask) & (n_pal - 1)];
+                v = pal[((((idx >> sh) & mask) | base) & 1023u) % (uint32_t)n_pal];
                 break;
             }
             case GE_PSM_T8: {
                 const uint32_t idx = row[x];
-                v = pal[((idx >> sh) & mask) & (n_pal - 1)];
+                v = pal[((((idx >> sh) & mask) | base) & 1023u) % (uint32_t)n_pal];
                 break;
             }
             default: v = 0xFF00FF00u; break;

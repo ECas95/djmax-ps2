@@ -33,11 +33,13 @@ typedef struct {
 int ge_tex_bpp(int psm);
 
 /* Decodes one texture. `stride` is in texels per row (TEXBUFWIDTH0); pass 0 to
- * use w. CLUT parameters come from TEXCLUT (cfmt/shift/mask) and CLUTADDR.
+ * use w. CLUT parameters come from TEXCLUT (cfmt/shift/mask/start) and CLUTADDR.
+ * `clut_start` is the bank base in 16-entry units (reg 0xC5 bits 16-20); the
+ * caller must supply a CLUT buffer covering start*16 + 16/256 entries.
  * Returns 0 on success, <0 on bad arguments/unsupported format. */
 int ge_tex_decode(const uint8_t *src, int w, int h, int psm, uint32_t stride,
                   const uint8_t *clut, int clut_psm, int clut_shift, int clut_mask,
-                  int swizzled, ge_tex_image *out);
+                  int clut_start, int swizzled, ge_tex_image *out);
 
 void ge_tex_free(ge_tex_image *img);
 

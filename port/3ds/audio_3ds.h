@@ -16,6 +16,11 @@ void     ps2_audio_push(int ch, const int16_t *lr, uint32_t frames);
 void     ps2_audio_reset(int ch);
 
 uint64_t ps2_time_us(void);
+
+/* Pacing de audio fiel al PSP: esperas con fecha límite y preempción desde
+ * psp_hle_call para que los hilos de audio respiren a mitad de frame. */
+void ps2_audio_wait_until(uint64_t when_us);
 void ps2_audio_preempt(void);
+void ps2_audio_set_pump(void (*fn)(void));
 
 #endif

@@ -311,7 +311,13 @@ static void hle_WaitThreadEnd(void) {
 
 static void hle_DelayThread(void) {
     log_wait("delay", 0);
-    ps2_sched_yield();
+    /* Honrar los µs pedidos contra el reloj real (modelo PS2: wait_until). */
+    uint32_t us = psp_arg(0);
+    {   static uint32_t dl;
+        if (dl < 24u) { dl++;
+            psp_printf("[adiag] delay th=0x%X us=%u\n", ps2_sched_current_uid(), us); } }
+    if (us > 250000u) us = 250000u;
+    ps2_audio_wait_until(ps2_time_us() + us);
     psp_ret(0);
 }
 
@@ -1266,29 +1272,29 @@ static void hle_SetFrameBuf(void){
 static void hle_GetFramePerSec(void) { psp_ret(60); }
 
 /* ---- sceAudio: canales PSP reales sobre el backend ndsp (audio_3ds.c) -----
- * Cada canal es un FIFO de frames estéreo a 44100 Hz. Las variantes blocking
- * ceden al scheduler hasta que el FIFO baja a un búfer pendiente: eso ancla el
- * hilo de audio del juego al reloj real, como el hardware del PSP. */
+ * Modelo del port PS2: el hardware encola UN buffer; una salida blocking espera
+ * a que el anterior termine (reloj busy_until por canal) y encola. Así
+ * GetChannelRestLength drena a 44.1 kHz real y el hilo de audio del juego
+ * produce granos a la tasa correcta (sin esto, voces/UI salen ralentizadas). */
 #define AUDIO_SAMPLE_MAX 4096u
-static struct { int resv; uint32_t samples; uint32_t format; } g_ach[PS2_AUDIO_CH];
+#define AUDIO_LATE_OK 1024u            /* tarde pero contiguo: sin reset del reloj */
+static struct {
+    int resv, mono;
+    uint32_t samples;
+    uint64_t busy_until;               /* µs */
+    uint64_t next_smp;                 /* reloj de muestras del canal */
+} g_ach[PS2_AUDIO_CH];
 static int16_t  g_atmp[AUDIO_SAMPLE_MAX * 2];
 static uint32_t g_audio_logs, g_audio_calls, g_audio_nz;
 
-static int audio_wait_space(int ch, uint32_t frames) {
-    uint32_t guard = 0;
-    while (ps2_audio_level(ch) > frames) {
-        ps2_sys_pump();
-        ps2_sched_yield();
-        if ((++guard & 63u) == 0u) svcSleepThread(250000);   /* 0.25 ms */
-        if (guard > 400000u) return 0;                       /* anti-cuelgue */
-    }
-    return 1;
-}
+static inline uint64_t aud_us2smp(uint64_t us) { return us * 441ull / 10000ull; }
+static inline uint64_t aud_smp2us(uint64_t s)  { return s * 10000ull / 441ull; }
+
 static void audio_out(int ch, uint32_t voll, uint32_t volr, uint32_t buf, int blocking) {
     if (ch < 0 || ch >= PS2_AUDIO_CH || !g_ach[ch].resv || !buf) { psp_ret(0x80260002u); return; }
     uint32_t n = g_ach[ch].samples ? g_ach[ch].samples : 1024u;
     if (n > AUDIO_SAMPLE_MAX) n = AUDIO_SAMPLE_MAX;
-    const int mono = g_ach[ch].format != 0;
+    const int mono = g_ach[ch].mono;
     const int16_t *s = (const int16_t *)psp_mem_ptr(buf, n * (mono ? 2u : 4u));
     if (!s) { psp_ret(0x80260002u); return; }
     if (!ps2_audio_ok()) {              /* sin backend: consumir y marcar el paso del tiempo */
@@ -1297,12 +1303,19 @@ static void audio_out(int ch, uint32_t voll, uint32_t volr, uint32_t buf, int bl
         psp_ret(n);
         return;
     }
-    if (blocking) {
-        if (!audio_wait_space(ch, n)) { psp_ret(n); return; }
-    } else if (ps2_audio_level(ch) > n) {
-        psp_ret(0x80260002u);           /* canal ocupado */
-        return;
+    uint64_t start = ps2_time_us();
+    int contiguous = 0;
+    if (g_ach[ch].busy_until > start) {
+        if (!blocking) { psp_ret(0x80260002u); return; }   /* canal ocupado */
+        start = g_ach[ch].busy_until;
+        ps2_audio_wait_until(start);
+        contiguous = 1;
+    } else if (g_ach[ch].next_smp && aud_us2smp(start) < g_ach[ch].next_smp + AUDIO_LATE_OK) {
+        contiguous = 1;                 /* tarde, pero su hueco aun no se reprodujo */
     }
+    g_ach[ch].busy_until = contiguous ? aud_smp2us(g_ach[ch].next_smp + n)
+                                      : start + aud_smp2us(n);
+    g_ach[ch].next_smp = (contiguous ? g_ach[ch].next_smp : aud_us2smp(start)) + n;
     if (voll > 0x8000u) voll = 0x8000u;
     if (volr > 0x8000u) volr = 0x8000u;
     uint32_t nz = 0;
@@ -1316,6 +1329,23 @@ static void audio_out(int ch, uint32_t voll, uint32_t volr, uint32_t buf, int bl
     ps2_audio_push(ch, g_atmp, n);
     g_audio_calls++;
     if (nz) g_audio_nz++;
+    {   /* tasa efectiva por canal: detecta contenidos ralentizados/acelerados */
+        static uint64_t t0[PS2_AUDIO_CH];
+        static uint64_t fr[PS2_AUDIO_CH];
+        static uint32_t cn[PS2_AUDIO_CH], nzc[PS2_AUDIO_CH];
+        const uint64_t now = ps2_time_us();
+        if (!t0[ch]) t0[ch] = now;
+        fr[ch] += n;
+        if (nz) nzc[ch]++;
+        if (++cn[ch] == 400u) {
+            const uint64_t dt = now - t0[ch];
+            uint32_t pf, wc;
+            { extern void ps2_audio_diag(uint32_t *, uint32_t *); ps2_audio_diag(&pf, &wc); }
+            psp_printf("[adiag] ch=%d Hz=%u nz=%u/400 len=%u preempt=%u waits=%u\n", ch,
+                       dt ? (uint32_t)(fr[ch] * 1000000ull / dt) : 0u, nzc[ch], n, pf, wc);
+            t0[ch] = now; fr[ch] = 0; cn[ch] = nzc[ch] = 0;
+        }
+    }
     if (g_audio_logs < 6 && (g_audio_calls == 1 || g_audio_calls == 100 || g_audio_calls == 1000)) {
         g_audio_logs++;
         psp_printf("[audio] out ch=%d n=%u vol=%u/%u mono=%d calls=%u nz=%u level=%u\n",
@@ -1331,28 +1361,44 @@ static void hle_AudioChReserve(void) {
     int ch = (int)psp_arg(0);
     const uint32_t samples = psp_arg(1), format = psp_arg(2);
     if (ch < 0) { for (ch = 0; ch < PS2_AUDIO_CH && g_ach[ch].resv; ch++) { } }
-    if (ch >= PS2_AUDIO_CH || samples == 0) { psp_ret(0x80260001u); return; }
+    if (ch >= PS2_AUDIO_CH || samples < 64u || samples > AUDIO_SAMPLE_MAX || (samples & 63u)) {
+        psp_ret(0x80260001u);
+        return;
+    }
     g_ach[ch].resv = 1;
     g_ach[ch].samples = samples;
-    g_ach[ch].format = format;
+    g_ach[ch].mono = format == 0x10u;
+    g_ach[ch].busy_until = 0;
+    g_ach[ch].next_smp = 0;
     ps2_audio_reset(ch);
     psp_printf("[audio] ChReserve ch=%d samples=%u format=%u\n", ch, samples, format);
     psp_ret((uint32_t)ch);
 }
 static void hle_AudioChRelease(void) {
     const int ch = (int)psp_arg(0);
-    if (ch >= 0 && ch < PS2_AUDIO_CH) { g_ach[ch].resv = 0; ps2_audio_reset(ch); }
+    if (ch >= 0 && ch < PS2_AUDIO_CH) {
+        g_ach[ch].resv = 0;
+        g_ach[ch].next_smp = 0;
+        ps2_audio_reset(ch);
+    }
     psp_ret(0);
 }
 static void hle_AudioSetChannelDataLen(void) {
     const int ch = (int)psp_arg(0);
-    if (ch >= 0 && ch < PS2_AUDIO_CH && psp_arg(1) <= AUDIO_SAMPLE_MAX)
+    if (ch >= 0 && ch < PS2_AUDIO_CH && psp_arg(1) <= AUDIO_SAMPLE_MAX) {
+        static uint32_t chg;
+        if (g_ach[ch].samples != psp_arg(1) && chg < 12u) { chg++;
+            psp_printf("[adiag] DataLen ch=%d %u->%u\n", ch, g_ach[ch].samples, psp_arg(1)); }
         g_ach[ch].samples = psp_arg(1);
+    }
     psp_ret(0);
 }
 static void hle_AudioRestLen(void) {
     const int ch = (int)psp_arg(0);
-    psp_ret(ch >= 0 && ch < PS2_AUDIO_CH ? ps2_audio_level(ch) : 0u);
+    if (ch < 0 || ch >= PS2_AUDIO_CH) { psp_ret(0); return; }
+    const uint64_t now = ps2_time_us();
+    psp_ret(g_ach[ch].busy_until > now
+            ? (uint32_t)aud_us2smp(g_ach[ch].busy_until - now) : 0u);
 }
 
 /* ---- controller: pad 1 through the ROM's PADMAN ---------------------------
@@ -1818,6 +1864,10 @@ static void hle_SasSetPitch(void) {
         uint32_t p = psp_arg(2);
         if (p < 1u) p = 1u;
         if (p > 0x4000u) p = 0x4000u;
+        if (p != 0x1000u) {
+            static uint32_t odd;
+            if (odd < 8u) { odd++; psp_printf("[adiag] sas pitch v=%d 0x%X\n", i, p); }
+        }
         g_sas.v[i].pitch = p;
     }
     psp_ret(0);
@@ -1914,106 +1964,8 @@ static void log_sig(const char *what, uint32_t uid, uint32_t val) {
                    ps2_sched_current_uid(), uid, val, psp_cpu.r[PSP_REG_RA]);
     }
 }
-/* ---- sceAtrac3plus: silent but coherent state (BGM runs on the frame loop) */
-/* ---- sceAtrac3plus: decoder silencioso con reloj real ------------------------
- * El chart de DJMAX avanza con la posición del stream Atrac: aunque el PCM sea
- * silencio, la posición debe correr. El pacing lo da sceAudioOutputBlocking.
- * La BGM real (AT3/AT3+) requiere un decoder que aún no está portado. */
-#define ATRAC_IDS 4
-#define ATRAC_FRAME_SAMPLES 2048u
-static struct {
-    int      used;
-    uint32_t total, cur;        /* en samples */
-    uint32_t channels;
-    int      loop;
-} g_atr[ATRAC_IDS];
-static uint32_t g_atrac_logs;
-
-static void hle_AtracSetData(void) {
-    const uint32_t data = psp_arg(0), size = psp_arg(1);
-    int id = 0;
-    for (; id < ATRAC_IDS && g_atr[id].used; id++) { }
-    if (id >= ATRAC_IDS) id = ATRAC_IDS - 1;
-    g_atr[id].used = 1;
-    g_atr[id].cur = 0;
-    g_atr[id].channels = 2;
-    g_atr[id].loop = 0;
-    g_atr[id].total = 44100u * 180u;              /* 3 min si no hay 'fact' */
-    const uint8_t *p = (const uint8_t *)psp_mem_ptr(data, 256);
-    if (p && !memcmp(p, "RIFF", 4)) {
-        g_atr[id].channels = p[22] | (p[23] << 8) ? (uint32_t)(p[22] | (p[23] << 8)) : 2u;
-        /* el chunk fact lleva el total de samples del stream */
-        for (uint32_t o = 12; o + 8 < 240; ) {
-            const uint32_t cid = p[o] | (p[o+1]<<8) | (p[o+2]<<16) | ((uint32_t)p[o+3]<<24);
-            const uint32_t clen = p[o+4] | (p[o+5]<<8) | (p[o+6]<<16) | ((uint32_t)p[o+7]<<24);
-            if (cid == 0x74636166u) {             /* 'fact' */
-                g_atr[id].total = p[o+8] | (p[o+9]<<8) | (p[o+10]<<16) | ((uint32_t)p[o+11]<<24);
-                break;
-            }
-            if (cid == 0x61746164u) break;        /* 'data' */
-            o += 8u + ((clen + 1u) & ~1u);
-        }
-        if (g_atrac_logs < 8) { g_atrac_logs++;
-            psp_printf("[atrac] id=%d fmt=%02X%02X ch=%u total=%u (reloj real, PCM silencio)\n",
-                       id, p[20], p[21], g_atr[id].channels, g_atr[id].total); }
-    }
-    psp_ret((uint32_t)id);
-}
-/* sceAtracDecodeData(id, out, *samples, *end, *remain) */
-static void hle_AtracDecodeData(void) {
-    const uint32_t id = psp_arg(0) < ATRAC_IDS ? psp_arg(0) : 0;
-    const uint32_t out = psp_arg(1), pn = psp_arg(2), pend = psp_arg(3), prem = psp_arg(4);
-    uint32_t n = ATRAC_FRAME_SAMPLES;
-    if (g_atr[id].cur + n > g_atr[id].total) n = g_atr[id].total - g_atr[id].cur;
-    int end = 0;
-    if (n == 0) {
-        if (g_atr[id].loop) { g_atr[id].cur = 0; n = ATRAC_FRAME_SAMPLES; }
-        else end = 1;
-    }
-    const uint32_t ch = g_atr[id].channels == 1 ? 1u : 2u;
-    void *dst = out && n ? psp_mem_ptr(out, n * ch * 2u) : NULL;
-    if (dst) memset(dst, 0, n * ch * 2u);
-    g_atr[id].cur += n;
-    if (pn)   psp_write32(pn, n);
-    if (pend) psp_write32(pend, end);
-    if (prem) psp_write32(prem, end ? 0u : 0xFFFFFFFFu);   /* -1: quedan frames */
-    psp_ret(end ? 0x80630024u : 0);                        /* ATRAC_ERROR_ALL_DATA_DECODED */
-}
-static void hle_AtracGetSoundSample(void) {   /* (id, *end, *loopstart, *loopend) */
-    const uint32_t id = psp_arg(0) < ATRAC_IDS ? psp_arg(0) : 0;
-    if (psp_arg(1)) psp_write32(psp_arg(1), g_atr[id].total ? g_atr[id].total - 1u : 0u);
-    if (psp_arg(2)) psp_write32(psp_arg(2), 0xFFFFFFFFu);  /* sin loop */
-    if (psp_arg(3)) psp_write32(psp_arg(3), 0);
-    psp_ret(0);
-}
-static void hle_AtracGetRemainFrame(void) {
-    const uint32_t id = psp_arg(0) < ATRAC_IDS ? psp_arg(0) : 0;
-    if (psp_arg(1)) psp_write32(psp_arg(1), g_atr[id].cur >= g_atr[id].total ? 0u : 0xFFFFFFFFu);
-    psp_ret(0);
-}
-static void hle_AtracSetLoopNum(void) {
-    const uint32_t id = psp_arg(0) < ATRAC_IDS ? psp_arg(0) : 0;
-    g_atr[id].loop = (int)psp_arg(1) != 0;
-    psp_ret(0);
-}
-static void hle_AtracNextDecodePos(void) {    /* (id, *pos) */
-    const uint32_t id = psp_arg(0) < ATRAC_IDS ? psp_arg(0) : 0;
-    if (psp_arg(1)) psp_write32(psp_arg(1), g_atr[id].cur);
-    psp_ret(g_atr[id].cur >= g_atr[id].total ? 0x80630024u : 0);
-}
-static void hle_AtracReleaseID(void) {
-    const uint32_t id = psp_arg(0);
-    if (id < ATRAC_IDS) g_atr[id].used = 0;
-    psp_ret(0);
-}
-/* streaming: "todo en memoria": nunca pide más datos */
-static void hle_AtracStreamInfo(void) {       /* (id, *write, *writable, *readoff) */
-    if (psp_arg(1)) psp_write32(psp_arg(1), 0);
-    if (psp_arg(2)) psp_write32(psp_arg(2), 0);
-    if (psp_arg(3)) psp_write32(psp_arg(3), 0);
-    psp_ret(0);
-}
-static void hle_AtracAddStreamData(void) { psp_ret(0); }
+/* ---- sceAtrac3plus: decodificación real en atrac_3ds.c (ps2_atrac.h + at3) */
+void ps2_atrac_install(void);
 
 /* ---- Utility / RTC: dialogs report "finished" so no frame loop waits ---- */
 /* ---- sceUtility savedata + msg dialog: protocolo real -----------------------
@@ -2129,6 +2081,7 @@ static void hle_IoDevctl(void) {
     psp_ret(0);
 }
 void ps2_hle_install(void) {
+    ps2_audio_set_pump(ps2_sys_pump);   /* HOME responde incluso en esperas de audio */
     /* SysMem */
     psp_hle_register(0x237DBD4F, "SysMemUserForUser", "sceKernelAllocPartitionMemory", hle_AllocPartitionMemory);
     psp_hle_register(0xB6D61D02, "SysMemUserForUser", "sceKernelFreePartitionMemory",  hle_FreePartitionMemory);
@@ -2345,16 +2298,8 @@ void ps2_hle_install(void) {
     psp_hle_register(0xD59EAD2F, "ThreadManForUser", "sceKernelWakeupThread", hle_IoReturn0);
     psp_hle_register(0x383F7BCC, "ThreadManForUser", "sceKernelWakeupThread?", hle_IoReturn0);
 
-    /* identified by SHA-1: Atrac3plus, Utility dialogs and RTC */
-    psp_hle_register(0x6A8C3CD5, "sceAtrac3plus", "sceAtracDecodeData",      hle_AtracDecodeData);
-    psp_hle_register(0x7A20E7AF, "sceAtrac3plus", "sceAtracSetDataAndGetID",  hle_AtracSetData);
-    psp_hle_register(0xA2BBA8BE, "sceAtrac3plus", "sceAtracGetSoundSample",   hle_AtracGetSoundSample);
-    psp_hle_register(0x9AE849A7, "sceAtrac3plus", "sceAtracGetRemainFrame",   hle_AtracGetRemainFrame);
-    psp_hle_register(0x868120B5, "sceAtrac3plus", "sceAtracSetLoopNum",       hle_AtracSetLoopNum);
-    psp_hle_register(0xE23E3A35, "sceAtrac3plus", "sceAtracGetNextDecodePosition", hle_AtracNextDecodePos);
-    psp_hle_register(0x61EB33F5, "sceAtrac3plus", "sceAtracReleaseAtracID",   hle_AtracReleaseID);
-    psp_hle_register(0x5D268707, "sceAtrac3plus", "sceAtracGetStreamDataInfo", hle_AtracStreamInfo);
-    psp_hle_register(0x7DB31251, "sceAtrac3plus", "sceAtracAddStreamData",    hle_AtracAddStreamData);
+    /* identified by SHA-1: Atrac3plus (real, atrac_3ds.c), Utility dialogs and RTC */
+    ps2_atrac_install();
     psp_hle_register(0x2AD8E239, "sceUtility", "sceUtilityMsgDialogInitStart", hle_UtilityMsgInit);
     psp_hle_register(0x9A1C91D7, "sceUtility", "sceUtilityMsgDialogGetStatus", hle_UtilityMsgStatus);
     psp_hle_register(0x95FC253B, "sceUtility", "sceUtilityMsgDialogUpdate",    hle_UtilityUpdate);

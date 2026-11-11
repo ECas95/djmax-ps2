@@ -95,6 +95,8 @@ typedef struct {
     uint32_t frame_used, frame_loaded;
     uint32_t bytes;
     uint32_t fp;                   /* huella del contenido subido */
+    uint32_t ckey;                 /* color test: clave RGB o 0xFFFFFFFF off */
+    uint32_t cmask;
     int      fp_valid;
     int valid;
 } GpuTexSlot;
@@ -275,7 +277,8 @@ static int texture_upload(GpuTexSlot *t) {
     const uint8_t *clut = NULL;
     const int indexed = (t->psm >= GE_PSM_T4 && t->psm <= GE_PSM_T32);
     const uint32_t cfmt = t->clut_cfg & 3u;
-    const uint32_t pal_count = t->psm == GE_PSM_T4 ? 16u : 256u;
+    const uint32_t cstart = (t->clut_cfg >> 16) & 31u;
+    const uint32_t pal_count = (t->psm == GE_PSM_T4 ? 16u : 256u) + cstart * 16u;
     if (indexed) {
         if (t->psm > GE_PSM_T8) return 0;
         clut = (const uint8_t *)psp_mem_ptr(t->clut_addr,
@@ -292,8 +295,16 @@ static int texture_upload(GpuTexSlot *t) {
     ge_tex_image img = {0};
     if (ge_tex_decode(src, (int)w, (int)h, (int)t->psm, pitch, clut, (int)cfmt,
         (int)((t->clut_cfg >> 2) & 31u), (int)((t->clut_cfg >> 8) & 255u),
-        (int)t->swizzle, &img) != 0) {
+        (int)cstart, (int)t->swizzle, &img) != 0) {
         return 0;
+    }
+    /* PSP color test (GU_NOTEQUAL): los texels que casan con la clave no se
+     * dibujan. PICA no tiene color-key: se vacían en la textura (RGBA=0, que
+     * también anula blends aditivos). */
+    if (t->ckey != 0xFFFFFFFFu) {
+        const uint32_t key = t->ckey & t->cmask & 0xFFFFFFu;
+        for (uint32_t i = 0; i < w * h; i++)
+            if ((img.rgba[i] & t->cmask & 0xFFFFFFu) == key) img.rgba[i] = 0;
     }
     uint8_t *pica = (uint8_t *)malloc((size_t)w * h * 4u);
     if (!pica) { ge_tex_free(&img); return 0; }
@@ -317,6 +328,15 @@ static GpuTexSlot *texture_get(void) {
     const uint32_t clut_addr = (g_r[0xB0] & 0xFFFFFFu) | ((g_r[0xB1] & 0x0F0000u) << 8);
     const uint32_t cfg = g_r[0xC5];
     const uint32_t sw = g_r[0xC2] & 1u;
+    /* color test NOTEQUAL activo: clave de recorte por color (0x23/0xE2-0xE4) */
+    uint32_t ckey = 0xFFFFFFFFu, cmask = 0xFFFFFFu;
+    if ((g_r[0x23] & 1u) && !(g_r[0xD3] & 1u) && (g_r[0xE2] & 3u) == 3u) {
+        ckey = g_r[0xE3] & 0xFFFFFFu;
+        cmask = g_r[0xE4] & 0xFFFFFFu;
+        static uint32_t ck_logs;
+        if (ck_logs < 4u) { ck_logs++;
+            psp_printf("[ctest] key=%06X mask=%06X\n", ckey, cmask); }
+    }
     if (psm > GE_PSM_DXT5 || w < 8 || h < 8 || w > 1024 || h > 1024) {
         static uint32_t rej_logs;
         if (rej_logs < 8) { rej_logs++;
@@ -330,7 +350,8 @@ static GpuTexSlot *texture_get(void) {
         GpuTexSlot *t = &g_texcache[i];
         if (t->valid && t->addr == addr && t->w == w && t->h == h && t->psm == psm &&
             t->stride == stride && t->clut_addr == clut_addr &&
-            t->clut_cfg == cfg && t->swizzle == sw) {
+            t->clut_cfg == cfg && t->swizzle == sw &&
+            t->ckey == ckey && t->cmask == cmask) {
             slot = t;
             g_tex_hits++;
             break;
@@ -378,7 +399,9 @@ static GpuTexSlot *texture_get(void) {
         slot->addr = addr; slot->w = w; slot->h = h; slot->psm = psm;
         slot->stride = stride; slot->clut_addr = clut_addr;
         slot->clut_cfg = cfg; slot->swizzle = sw;
+        slot->ckey = ckey; slot->cmask = cmask;
         slot->bytes = bytes; slot->valid = 1;
+        slot->fp_valid = 0;
         g_tex_bytes += bytes;
         /* Force initial upload; frame_used makes this safe on subsequent draws. */
         slot->frame_loaded = UINT32_MAX;
@@ -505,12 +528,20 @@ static void census_add(const ge_census_call *c) {
 }
 
 static void prim_sprites(const Vtx *v, uint32_t n, const ge_census_call *cc) {
+    /* Medio texel de margen hacia dentro: el reescalado 480->400 muestrea en
+     * los bordes del rect y sangra texels vecinos del atlas (franjas magenta). */
+    const float iu = cc->tex_on && cc->tex_w ? 0.5f / (float)cc->tex_w : 0.0f;
+    const float iv = cc->tex_on && cc->tex_h ? 0.5f / (float)cc->tex_h : 0.0f;
     for (uint32_t i = 0; i + 1u < n; i += 2u) {
         const Vtx *a = &v[i], *b = &v[i + 1u];
         const float x0 = a->x < b->x ? a->x : b->x, x1 = a->x < b->x ? b->x : a->x;
         const float y0 = a->y < b->y ? a->y : b->y, y1 = a->y < b->y ? b->y : a->y;
-        const float u0 = a->x < b->x ? a->u : b->u, u1 = a->x < b->x ? b->u : a->u;
-        const float v0 = a->y < b->y ? a->v : b->v, v1 = a->y < b->y ? b->v : a->v;
+        float u0 = a->x < b->x ? a->u : b->u, u1 = a->x < b->x ? b->u : a->u;
+        float v0 = a->y < b->y ? a->v : b->v, v1 = a->y < b->y ? b->v : a->v;
+        if (u1 - u0 > 2.0f * iu)      { u0 += iu; u1 -= iu; }
+        else if (u0 - u1 > 2.0f * iu) { u0 -= iu; u1 += iu; }
+        if (v1 - v0 > 2.0f * iv)      { v0 += iv; v1 -= iv; }
+        else if (v0 - v1 > 2.0f * iv) { v0 -= iv; v1 += iv; }
         Vtx q[4];
         q[0] = (Vtx){ x0, y0, a->z, u0, v0, a->r, a->g, a->b, a->a };
         q[1] = (Vtx){ x1, y0, a->z, u1, v0, b->r, b->g, b->b, b->a };
@@ -518,7 +549,6 @@ static void prim_sprites(const Vtx *v, uint32_t n, const ge_census_call *cc) {
         q[3] = (Vtx){ x0, y1, a->z, u0, v1, a->r, a->g, a->b, a->a };
         tri(&q[0], &q[1], &q[2]);
         tri(&q[0], &q[2], &q[3]);
-        (void)cc;
     }
 }
 
@@ -577,12 +607,19 @@ static void set_blend(void) {
     static const GPU_BLENDEQUATION eq[8] = {
         GPU_BLEND_ADD, GPU_BLEND_SUBTRACT, GPU_BLEND_REVERSE_SUBTRACT,
         GPU_BLEND_MIN, GPU_BLEND_MAX, GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_BLEND_ADD };
-    const GPU_BLENDFACTOR s = ge_blend_factor(m & 15u, 1, sfix);
-    const GPU_BLENDFACTOR d = ge_blend_factor((m >> 4) & 15u, 0, dfix);
-    /* One shared constant on PICA; the source fix wins when both are constants. */
-    const uint32_t fix = (m & 15u) == 10u ? sfix : dfix;
-    if (s == GPU_CONSTANT_COLOR || d == GPU_CONSTANT_COLOR)
-        C3D_BlendingColor(fix | 0xFF000000u);   /* both are R | G<<8 | B<<16 */
+    GPU_BLENDFACTOR s = ge_blend_factor(m & 15u, 1, sfix);
+    GPU_BLENDFACTOR d = ge_blend_factor((m >> 4) & 15u, 0, dfix);
+    /* PICA tiene UNA constante de blend. Caso clásico PSP: ambos FIX con
+     * dfix ≈ ~sfix (fundido k/1-k): constante=sfix y el destino usa 1-cte. */
+    if (s == GPU_CONSTANT_COLOR && d == GPU_CONSTANT_COLOR) {
+        const uint32_t sum = (sfix & 255u) + (dfix & 255u);
+        if (sum >= 0xF0u && sum <= 0x10Fu) d = GPU_ONE_MINUS_CONSTANT_COLOR;
+        C3D_BlendingColor(sfix | 0xFF000000u);
+    } else if (s == GPU_CONSTANT_COLOR) {
+        C3D_BlendingColor(sfix | 0xFF000000u);
+    } else if (d == GPU_CONSTANT_COLOR) {
+        C3D_BlendingColor(dfix | 0xFF000000u);
+    }
     C3D_AlphaBlend(eq[(m >> 8) & 7u], GPU_BLEND_ADD, s, d, GPU_ONE, GPU_ZERO);
 }
 /* GE 0x22 alpha-test enable, 0xDB func/ref. */
@@ -661,6 +698,17 @@ static void prim_run(uint32_t prim_pc, uint32_t arg) {
     frame_begin();
     /* Per-primitive state. Flush without reusing the GPU's pending vertex data. */
     flush();
+    {   /* TEMP [blend]: primeras apariciones de factores FIX (gear/transparencias) */
+        const uint32_t m = g_r[0xDF];
+        if ((g_r[0x21] & 1u) && (((m & 15u) == 10u) || (((m >> 4) & 15u) == 10u))) {
+            static uint32_t bl;
+            if (bl < 20u) { bl++;
+                psp_printf("[blend] f=%u tex=%u tf=0x%X m=0x%06X sfix=%06X dfix=%06X at=%u db=0x%X n=%u\n",
+                           S.frames, cc.tex_on, g_r[0xC9], m,
+                           g_r[0xE0] & 0xFFFFFFu, g_r[0xE1] & 0xFFFFFFu,
+                           g_r[0x22] & 1u, g_r[0xDB], count); }
+        }
+    }
     GpuTexSlot *texture = NULL;
     /* Descriptor degenerado (addr 0 / 1x1): el juego deja tex habilitado sin
      * textura real; es geometría de color plano, no un fallo. */
