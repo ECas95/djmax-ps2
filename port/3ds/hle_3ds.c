@@ -364,6 +364,7 @@ static void hle_GetSystemTimeWide(void) {
     psp_ret((uint32_t)t);
     psp_cpu.r[PSP_REG_V1] = (uint32_t)(t >> 32);
 }
+static void hle_GetSystemTimeLow(void) { psp_ret((uint32_t)time_us()); }
 /* sceKernelSysClock2USec(clock*, sec*, usec*) */
 static void hle_SysClock2USec(void) {
     const uint32_t c = psp_arg(0);
@@ -2119,6 +2120,7 @@ void ps2_hle_install(void) {
     psp_hle_register(0x3B183E26, "ThreadManForUser", "sceKernelGetThreadExitStatus", hle_GetThreadExitStatus);
     psp_hle_register(0x82BC5777, "ThreadManForUser", "sceKernelGetSystemTimeWide",hle_GetSystemTimeWide);
     psp_hle_register(0xDB738F35, "ThreadManForUser", "sceKernelGetSystemTime",    hle_GetSystemTime);
+    psp_hle_register(0x369ED59D, "ThreadManForUser", "sceKernelGetSystemTimeLow", hle_GetSystemTimeLow);
     psp_hle_register(0xBA6B92E2, "ThreadManForUser", "sceKernelSysClock2USec",    hle_SysClock2USec);
     psp_hle_register(0x52089CA1, "ThreadManForUser", "sceKernelGetThreadStackFreeSize", hle_Ok0);
     psp_hle_register(0x71BC9871, "ThreadManForUser", "sceKernelChangeThreadPriority", hle_ChangeThreadPriority);
