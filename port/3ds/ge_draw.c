@@ -1175,12 +1175,12 @@ void ge_draw_init(void) {
     {   /* logo de la pantalla inferior (menús): RGBA8 crudo 512x128 */
         FILE *f = fopen("sdmc:/djmax/tex/bottom_logo.rgba", "rb");
         if (f) {
-            const size_t need = 512u * 128u * 4u;
+            const size_t need = 512u * 256u * 4u;
             uint32_t *px = (uint32_t *)malloc(need);
             uint8_t  *pica = (uint8_t *)malloc(need);
             if (px && pica && fread(px, 1, need, f) == need &&
-                C3D_TexInit(&g_logo, 512, 128, GPU_RGBA8)) {
-                ge_tex_image img = { px, 512, 128 };
+                C3D_TexInit(&g_logo, 512, 256, GPU_RGBA8)) {
+                ge_tex_image img = { px, 512, 256 };
                 ge_tex_to_pica_rgba8(&img, pica);
                 C3D_TexUpload(&g_logo, pica);
                 C3D_TexFlush(&g_logo);
@@ -1231,10 +1231,10 @@ void ge_draw_frame(uint32_t fb, uint32_t sync) {
                        GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA,
                        GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA);
         C3D_AlphaTest(false, GPU_ALWAYS, 0);
-        const Vtx l0 = {  60, 91, 0.5f, 0, 1, 1, 1, 1, 1 };
-        const Vtx l1 = { 420, 91, 0.5f, 1, 1, 1, 1, 1, 1 };
-        const Vtx l2 = { 420, 181, 0.5f, 1, 0, 1, 1, 1, 1 };
-        const Vtx l3 = {  60, 181, 0.5f, 0, 0, 1, 1, 1, 1 };
+        const Vtx l0 = {  75,  72, 0.5f, 0, 1, 1, 1, 1, 1 };
+        const Vtx l1 = { 405,  72, 0.5f, 1, 1, 1, 1, 1, 1 };
+        const Vtx l2 = { 405, 237, 0.5f, 1, 0, 1, 1, 1, 1 };
+        const Vtx l3 = {  75, 237, 0.5f, 0, 0, 1, 1, 1, 1 };
         tri(&l0, &l1, &l2); tri(&l0, &l2, &l3);
         flush();
         g_route = 0;
