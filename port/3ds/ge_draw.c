@@ -506,9 +506,21 @@ static GpuTexSlot *texture_get(void) {
 
 /* ---- draw buffer ---------------------------------------------------------- */
 static const void *g_last_rt;     /* evita re-bind del target por cada batch */
+static float g_slider;            /* slider 3D leído al abrir el frame */
 static void flush(void) {
     if (!g_vn || !g_ready || !g_frame_open) { g_vn = 0; return; }
+    const int stereo = !g_route && g_right && g_slider > 0.01f && g_cur_vp;
+    C3D_Mtx ml, mr;
     const C3D_Mtx *mx = g_cur_mtx ? g_cur_mtx : &g_mtx;
+    if (stereo) {
+        /* Disparidad p = x_der - x_izq (unidades PSP; >0 = detrás del plano de
+         * pantalla). Cada ojo ve la escena corrida p/2: mover la ventana a la
+         * derecha corre el contenido a la izquierda. */
+        const float h = 0.5f * g_cur_depth * g_slider;
+        Mtx_OrthoTilt(&ml, g_cur_vp->l + h, g_cur_vp->r + h, g_cur_vp->b, g_cur_vp->t, 0.0f, 1.0f, true);
+        Mtx_OrthoTilt(&mr, g_cur_vp->l - h, g_cur_vp->r - h, g_cur_vp->b, g_cur_vp->t, 0.0f, 1.0f, true);
+        mx = &ml;
+    }
     C3D_RenderTarget *rt = (C3D_RenderTarget *)((g_route && g_bottom) ? g_bottom : g_target);
     if ((const void *)rt != g_last_rt) {
         C3D_FrameDrawOn(rt);
@@ -520,20 +532,11 @@ static void flush(void) {
     GSPGPU_FlushDataCache(&g_vb[g_vbase], (size_t)g_vn * sizeof(Vtx));
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_uproj, mx);
     C3D_DrawArrays(GPU_TRIANGLES, g_vbase, g_vn);
-    /* 3D estéreo: el ojo derecho repite el batch con la ventana desplazada
-     * (paralaje positivo: la escena queda detrás del plano de pantalla). */
-    if (!g_route && g_right) {
-        const float sl = osGet3DSliderState();
-        if (sl > 0.01f && g_cur_vp) {
-            const float dx = g_cur_depth * sl;
-            C3D_Mtx m;
-            Mtx_OrthoTilt(&m, g_cur_vp->l + dx, g_cur_vp->r + dx,
-                          g_cur_vp->b, g_cur_vp->t, 0.0f, 1.0f, true);
-            C3D_FrameDrawOn((C3D_RenderTarget *)g_right);
-            C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_uproj, &m);
-            C3D_DrawArrays(GPU_TRIANGLES, g_vbase, g_vn);
-            g_last_rt = g_right;
-        }
+    if (stereo) {
+        C3D_FrameDrawOn((C3D_RenderTarget *)g_right);
+        C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g_uproj, &mr);
+        C3D_DrawArrays(GPU_TRIANGLES, g_vbase, g_vn);
+        g_last_rt = g_right;
     }
     g_vbase += g_vn;
     g_vn = 0;
@@ -617,7 +620,13 @@ static void frame_begin(void) {
         svcSleepThread(100000);        /* 0.1 ms si nadie más está listo */
     }
     C3D_RenderTargetClear((C3D_RenderTarget *)g_target, C3D_CLEAR_ALL, g_clear, 0);
-    if (g_right && osGet3DSliderState() > 0.01f)
+    g_slider = g_right ? osGet3DSliderState() : 0.0f;
+    if (g_right) {   /* modo 3D de la consola solo mientras el slider está arriba */
+        static int is3d = -1;
+        const int want = g_slider > 0.01f;
+        if (want != is3d) { is3d = want; gfxSet3D(want); }
+    }
+    if (g_right && g_slider > 0.01f)
         C3D_RenderTargetClear((C3D_RenderTarget *)g_right, C3D_CLEAR_ALL, g_clear, 0);
     if (g_bottom)
         C3D_RenderTargetClear((C3D_RenderTarget *)g_bottom, C3D_CLEAR_ALL, 0x000000FFu, 0);
@@ -981,6 +990,18 @@ static void prim_run(uint32_t prim_pc, uint32_t arg) {
         }
     } else {
         g_route = 0; g_cur_mtx = &g_mtx; g_cur_vp = &g_vp_top; g_cur_depth = 3.0f;
+    }
+    {   /* Capas de profundidad estéreo (disparidad en unidades PSP a slider=1,
+         * >0 = detrás de la pantalla): lo grande es fondo, lo pequeño (HUD,
+         * texto, notas) se acerca al plano; el gear sobresale un poco. */
+        int bw = cc.bbox[2] - cc.bbox[0], bh = cc.bbox[3] - cc.bbox[1];
+        if (bw < 0) bw = 0; else if (bw > 480) bw = 480;
+        if (bh < 0) bh = 0; else if (bh > 272) bh = 272;
+        const float area = (float)(bw * bh) / (480.0f * 272.0f);
+        float d = area >= 0.55f ? 7.0f : area >= 0.15f ? 3.5f : 1.0f;
+        if (g_bottom && g_split > 0 && g_gear_seen && !anim_bga && !lateral_bga)
+            d = area >= 0.10f ? -1.0f : -2.5f;
+        g_cur_depth = d;
     }
     if (got >= 2u) {
         /* Textura degenerada (addr 0): cristal ahumado del gear. Con el BGA en
