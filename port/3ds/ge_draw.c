@@ -951,17 +951,16 @@ static void prim_run(uint32_t prim_pc, uint32_t arg) {
     const int lateral_bga = big_tex && (cc.bbox[2] - cc.bbox[0]) >= 60 &&
         (cc.bbox[3] - cc.bbox[1]) >= 140 &&
         (cc.bbox[0] > 260 || cc.bbox[2] < 220);
-    int dup_bga = 0;                 /* BGA también tras el cristal del gear */
     if (g_bottom && g_split > 0) {
         const int is_gear = g_gear_seen && !anim_bga && !lateral_bga;
         switch (g_layout) {
         default: /* 0: BGA arriba, gear abajo */
             if (is_gear) { g_route = 1; g_cur_mtx = &g_mtx_split; g_cur_vp = &g_vp_split; g_cur_depth = 1.5f; }
-            else         { g_route = 0; g_cur_mtx = &g_mtx;       g_cur_vp = &g_vp_top;   g_cur_depth = 6.0f; dup_bga = 1; }
+            else         { g_route = 0; g_cur_mtx = &g_mtx;       g_cur_vp = &g_vp_top;   g_cur_depth = 6.0f; }
             break;
         case 1:  /* BGA abajo, gear arriba */
             if (is_gear) { g_route = 0; g_cur_mtx = &g_mtx_split_top; g_cur_vp = &g_vp_split_top; g_cur_depth = 1.5f; }
-            else         { g_route = 1; g_cur_mtx = &g_mtx_bot;      g_cur_vp = &g_vp_bot;       g_cur_depth = 6.0f; dup_bga = 1; }
+            else         { g_route = 1; g_cur_mtx = &g_mtx_bot;      g_cur_vp = &g_vp_bot;       g_cur_depth = 6.0f; }
             break;
         case 2:  /* todo abajo */
             g_route = 1; g_cur_mtx = &g_mtx_bot; g_cur_vp = &g_vp_bot;
@@ -976,36 +975,16 @@ static void prim_run(uint32_t prim_pc, uint32_t arg) {
         g_route = 0; g_cur_mtx = &g_mtx; g_cur_vp = &g_vp_top; g_cur_depth = 3.0f;
     }
     if (got >= 2u) {
-        /* Textura degenerada (addr 0): en el PSP real este draw es el cristal
-         * ahumado del gear (oscurece el BGA tras el carril). Aproximación:
-         * velo negro translúcido con el blend del juego (ref. PS2: ~78%). */
+        /* Textura degenerada (addr 0): cristal ahumado del gear. Con el BGA en
+         * la misma pantalla (layouts 2/3) es un velo translúcido sobre él; con
+         * el BGA en la otra pantalla (0/1) el fondo del carril es oscuro sólido. */
         if (cc.tex_on && tex_degenerate) {
-            if (g_bottom && g_split > 0 && g_layout < 2) {
-                /* el BGA duplicado solo debe verse a través del cristal: tapa
-                 * los laterales del encuadre del gear antes del velo */
-                const int gear_bottom = (g_layout != 1);
-                flush();
-                g_route = gear_bottom ? 1 : 0;
-                g_cur_mtx = gear_bottom ? &g_mtx_split : &g_mtx_split_top;
-                g_cur_vp  = gear_bottom ? &g_vp_split  : &g_vp_split_top;
-                const Vtx k0 = { -200, -20, 0.5f, 0, 0, 0, 0, 0, 1 };
-                const Vtx k1 = {  155, -20, 0.5f, 0, 0, 0, 0, 0, 1 };
-                const Vtx k2 = {  155, 300, 0.5f, 0, 0, 0, 0, 0, 1 };
-                const Vtx k3 = { -200, 300, 0.5f, 0, 0, 0, 0, 0, 1 };
-                const Vtx m0 = {  328, -20, 0.5f, 0, 0, 0, 0, 0, 1 };
-                const Vtx m1 = {  700, -20, 0.5f, 0, 0, 0, 0, 0, 1 };
-                const Vtx m2 = {  700, 300, 0.5f, 0, 0, 0, 0, 0, 1 };
-                const Vtx m3 = {  328, 300, 0.5f, 0, 0, 0, 0, 0, 1 };
-                tri(&k0, &k1, &k2); tri(&k0, &k2, &k3);
-                tri(&m0, &m1, &m2); tri(&m0, &m2, &m3);
-                flush();
-                g_route = gear_bottom ? 1 : 0;
-                g_cur_mtx = gear_bottom ? &g_mtx_split : &g_mtx_split_top;
-                g_cur_vp  = gear_bottom ? &g_vp_split  : &g_vp_split_top;
-            }
+            const int solo = g_bottom && g_split > 0 && g_layout < 2;
             for (uint32_t i = 0; i < got; i++) {
-                tmp[i].r = 0.0f; tmp[i].g = 0.0f; tmp[i].b = 0.0f;
-                tmp[i].a = 0.72f;
+                tmp[i].r = solo ? 0.05f : 0.0f;
+                tmp[i].g = solo ? 0.05f : 0.0f;
+                tmp[i].b = solo ? 0.07f : 0.0f;
+                tmp[i].a = solo ? 1.0f : 0.72f;
             }
             S.submitted++;
             if (type == 6u) prim_sprites(tmp, got, &cc);
@@ -1017,19 +996,6 @@ static void prim_run(uint32_t prim_pc, uint32_t arg) {
             if (type == 6u) prim_sprites(tmp, got, &cc);
             else prim_tris(tmp, got, type);
             if (g_vn > 0) g_guest_vertices_this_frame += (uint32_t)g_vn;
-            if (dup_bga && !g_gear_seen) {
-                /* copia en la pantalla del gear con SU encuadre: el cristal
-                 * ahumado la oscurece, como en la versión PS2 */
-                const int gear_bottom = (g_layout != 1);
-                flush();
-                g_route = gear_bottom ? 1 : 0;
-                g_cur_mtx = gear_bottom ? &g_mtx_split : &g_mtx_split_top;
-                g_cur_vp  = gear_bottom ? &g_vp_split  : &g_vp_split_top;
-                g_cur_depth = 6.0f;
-                if (type == 6u) prim_sprites(tmp, got, &cc);
-                else prim_tris(tmp, got, type);
-                flush();
-            }
         }
     } else {
         S.other++;
