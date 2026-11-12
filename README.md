@@ -3,7 +3,7 @@
 Experimental static recompilation of DJMAX Fever (PSP, ULUS-10403) to other consoles. One shared recompiler and game-code pipeline, two platform runtimes:
 
 - **PS2** (`port/ps2`): tested in PCSX2. Reaches song selection and gameplay with audio, keysounds, BGA video, results and memory-card save/load.
-- **3DS** (`port/3ds`): tested in Azahar (Citra successor). Boots, registers a DJ profile (saved to SD), navigates every menu and reaches 4B gameplay with GPU rendering, keysound/SFX audio and input. New 3DS gets 804 MHz + L2 cache automatically.
+- **3DS** (`port/3ds`): tested in Azahar (Citra successor) and on a real New 3DS. Boots, registers a DJ profile (saved to SD), navigates every menu and plays 4B gameplay at 60 fps with GPU rendering, real ATRAC BGM, keysound/SFX audio and input. Dual-screen gameplay, stereo 3D. New 3DS gets 804 MHz + L2 cache automatically.
 
 This repository contains source code and build tools only. It includes no game executable, generated game code, music, charts, graphics, BIOS, converted movie data, or song-import pipeline. You must provide your own game dump and decrypted EBOOT. Build artifacts embed segments from that EBOOT and are local only — never redistribute them.
 
@@ -11,7 +11,9 @@ This repository contains source code and build tools only. It includes no game e
 
 **PS2** — A full song has been played in PCSX2. Development build: all modes/songs, long-session audio, score persistence, movie sync and equipment combinations still need systematic verification. Network is out of scope. Real PS2 hardware and disc/OPL loading are not validated (file access uses PCSX2 `host:`).
 
-**3DS** — Verified in Azahar 2126.2: boot, intro-movie clean skip, profile registration with real savedata on `sdmc:/djmax/SAVE/`, title → mode select → song select → 4B gameplay at ~30 fps (emulator CPU clock 400%, or New 3DS hardware untested). Audio: PSP SAS core is a real VAG/ADPCM mixer (keysounds and menu SFX audible through ndsp), sceAudio channels are real FIFOs paced to 44.1 kHz. Atrac BGM runs on a silent real-time clock so charts scroll correctly; the AT3/AT3+ PCM decode is pending (`third_party/at3_standalone_src` is the intended route). BGA/intro movies are skipped coherently, not decoded. Old 3DS boots but will not hold 30 fps; the recomp is CPU-bound.
+**3DS** — Verified in Azahar 2126.2 and on real New 3DS hardware: boot, profile registration with real savedata on `sdmc:/djmax/SAVE/`, title → mode select → song select → 4B gameplay. Emulator: 60.0 fps measured at 400% CPU clock. Real New 3DS: an 18-minute session ran 64k frames with 0 bad memory accesses, ~89% of 300-frame windows at 58–60 fps; the dips line up with song loads from the SD, not with gameplay. Audio: PSP SAS core is a real VAG/ADPCM mixer and sceAudio channels are real FIFOs paced to 44.1 kHz (measured 44.1 kHz on both BGM and SAS channels, on emulator and hardware); BGM is real AT3/AT3+ decoded through `third_party/at3_standalone_src`. The root cause of earlier audio/FPS trouble was `C3D_FrameBegin(SYNCDRAW)` blocking the host for ~16 ms per frame and starving the guest audio thread; frames are now non-blocking with a 60 Hz deadline wait so audio threads keep running. Intro PMF movies are skipped, not decoded. Old 3DS boots but is CPU-bound and will not hold 60 fps.
+
+**3DS screens** — Gameplay uses both screens: BGA on top, gear (zoomed) on the bottom; menus show the idle logo on the bottom. In gameplay `SELECT` cycles four layouts (BGA↑/gear↓, BGA↓/gear↑, both↓, both↑); the choice is saved in `sdmc:/djmax/layout.bin`. When BGA and gear share a screen the gear's glass is a translucent veil over the BGA; when they are on separate screens the lane is solid dark. Stereo 3D (console, slider-driven layered parallax) is implemented but unverified on hardware; in an emulator create `sdmc:/djmx_3d.flag` to enable it (it costs frames in Azahar).
 
 > Old Citra nightlies (e.g. 2104, March 2024) do not execute GPU command lists from homebrew built with current libctru/citro3d — not even devkitPro's `simple_tri` example. Use [Azahar](https://github.com/azahar-emu/azahar) ≥ 2126.
 
@@ -89,20 +91,29 @@ sdmc:/djmax/PSP_GAME/...     <- your own dump's PSP_GAME tree
 sdmc:/djmax/SAVE/            <- created automatically (profile save)
 sdmc:/3ds/dspfirm.cdc        <- console: dump with the DSP1 homebrew for audio.
                                 Emulator: a dummy file is created automatically.
-sdmc:/autopad.txt            <- optional scripted input ("<ms> <hex PSP buttons>" lines)
+sdmc:/djmax/tex/<FP>.rgba    <- optional texture packs: raw RGBA8 (R,G,B,A) replacing the art whose
+                                content fingerprint is <FP> (see make_rgba.ps1 / the texdump flag)
+sdmc:/djmax/tex/bottom_logo.rgba <- optional bottom-screen idle logo, raw RGBA8 512x256
+                                (make_bottom_logo.ps1 builds one from a PNG)
+sdmc:/djmax/layout.bin       <- created automatically (SELECT layout choice)
+sdmc:/djmx_autopad.txt       <- test only: scripted input ("<ms> <hex PSP buttons>" lines). Remove it
+                                for normal play or the game drives itself.
+sdmc:/djmx_texdump.flag      <- optional: dump every unique texture to sdmc:/ge/tex/*.png
+sdmc:/djmx_console.flag      <- optional: debug console on the bottom screen instead of the GPU target
+sdmc:/djmx_3d.flag           <- optional: force stereo 3D in an emulator (always on for real consoles)
 ```
 
 ### Running
 
-- **Azahar**: `azahar.exe path\to\djmax3ds.3dsx` (or the `.3ds`/installed `.cia`). Set *CPU clock* to 400% in emulation settings for full speed; keep New 3DS mode enabled (default).
-- **Console (CFW/Luma3DS)**: install `djmax3ds.cia` with FBI, or run the `.3dsx` from the Homebrew Launcher. Dump your DSP firmware once with DSP1 for sound. Real-hardware performance is only acceptable on New 3DS and is still unverified.
+- **Azahar**: `azahar.exe path\to\djmax3ds.3ds` (or the installed `.cia`; the `.3dsx` must be built with `-Opt Os` — the Azahar 3dsx loader rejects `-O2` binaries). Set *CPU clock* to 400% in emulation settings and enable the dual-screen layout; keep New 3DS mode enabled (default).
+- **Console (CFW/Luma3DS)**: install `djmax3ds.cia` with FBI, or run the `.3dsx` from the Homebrew Launcher. Dump your DSP firmware once with DSP1 for sound. Real-hardware performance is good on New 3DS (see Current state).
 
-Controls: D-pad = PSP d-pad, `A/B/X/Y` = `○/✕/△/□`, `L/R` = `L/R`, `START/SELECT` = `START/SELECT`, circle pad = analog nub.
+Controls: D-pad = PSP d-pad, `A/B/X/Y` = `○/✕/△/□`, `L/R` = `L/R`, `START` = `START`, circle pad = analog nub. `SELECT` = PSP `SELECT` in menus; during gameplay it cycles the screen layout instead. Always rerun `make_cia.ps1` after a build, or you will test a stale `.3ds`.
 
 ## Source layout and attribution
 
 - `port/ps2`: PS2 runtime, HLE, scheduler, graphics and audio backends.
-- `port/3ds`: 3DS runtime: cooperative scheduler, PSP HLE (threads, IO, SAS/VAG mixer, sceAudio→ndsp, savedata, sceMpeg skip), GE→citro3d renderer with texture cache, CIA packaging.
+- `port/3ds`: 3DS runtime: cooperative scheduler with deadline-targeted audio preemption, PSP HLE (threads, IO, SAS/VAG mixer, sceAtrac with real AT3/AT3+ decode, sceAudio→ndsp with per-channel jitter buffer, savedata, sceMpeg skip), GE→citro3d renderer (texture cache, packs, dual-screen routing, stereo 3D), CIA packaging.
 - `port/tools` and `tools-src`: local regeneration, relocation, source fixes and base movie conversion.
 - `.tools/psprecomp`: source snapshot from [sp00nznet/psprecomp](https://github.com/sp00nznet/psprecomp), revision `5ca18fac1691a4a7b40ae683dabdf72a5703d2b8`, MIT. Local modifications included; original license retained.
 - `third_party/at3_standalone_src`: FFmpeg ATRAC decoders extracted by PPSSPP, LGPL 2.1 or later. Attribution, headers, license and local changes retained in that directory.
