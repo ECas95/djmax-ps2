@@ -1456,7 +1456,7 @@ void ps2_pad_init(void) {
     gedump_init();
     static char text[16384];
     int fd = open("host:autopad.txt", O_RDONLY);
-    if (fd < 0) fd = open("sdmc:/autopad.txt", O_RDONLY);   /* 3DS: no hay host: */
+    if (fd < 0) fd = open("sdmc:/djmx_autopad.txt", O_RDONLY);   /* solo pruebas: nombre explícito */
     if (fd < 0) return;
     const int len = (int)read(fd, text, sizeof text - 1);
     close(fd);
