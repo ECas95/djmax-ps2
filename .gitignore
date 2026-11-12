@@ -45,3 +45,6 @@ __pycache__/
 *.cdc
 *.shbin
 *.map
+
+# game-derived assets embedded in the CIA RomFS (never committed)
+port/3ds/cia/romfs/

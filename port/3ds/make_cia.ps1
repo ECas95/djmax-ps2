@@ -40,6 +40,15 @@ if (-not (Test-Path $banner) -or -not (Test-Path $icon)) { Write-Host 'ERROR: ba
 $rsf = Join-Path $Cia 'djmax3ds.rsf'
 $out_cia = Join-Path $Build 'djmax3ds.cia'
 $out_cci = Join-Path $Build 'djmax3ds.3ds'
+Remove-Item $out_cia, $out_cci -ErrorAction SilentlyContinue   # nunca dejar pasar una salida vieja
+# RomFS opcional: cia\romfs\tex\*.rgba (logos y texture packs). La SD manda sobre el romfs.
+$romfs = Join-Path $Cia 'romfs'
+if (Test-Path (Join-Path $romfs 'tex')) {
+    $root = (Resolve-Path $romfs).Path -replace '\\', '/'
+    $rsf = Join-Path $Build 'djmax3ds_romfs.rsf'
+    Set-Content $rsf ((Get-Content (Join-Path $Cia 'djmax3ds.rsf') -Raw) + "`nRomFs:`n  RootPath: `"$root`"`n") -NoNewline
+    Write-Host "RomFS: $romfs"
+}
 & $makerom -f cia -o $out_cia -elf $elf -rsf $rsf -icon $icon -banner $banner -exefslogo -target t
 if (-not (Test-Path $out_cia)) { Write-Host 'ERROR: makerom cia fallo' -ForegroundColor Red; exit 1 }
 & $makerom -f cci -o $out_cci -elf $elf -rsf $rsf -icon $icon -banner $banner -exefslogo -target t

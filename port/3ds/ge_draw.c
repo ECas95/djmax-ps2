@@ -343,36 +343,44 @@ static int texture_upload(GpuTexSlot *t) {
             }
         }
     }
-    {   /* Texture packs: sdmc:/djmax/tex/<FP>.rgba (RGBA8 crudo, WxH exactos)
-         * reemplaza el arte decodificado. La huella es de CONTENIDO fuente:
-         * estable entre corridas y ajena a la direccion de carga. */
-        static int want = -1;
-        if (want < 0) {
-            DIR *d = opendir("sdmc:/djmax/tex");
-            want = d != NULL;
-            if (d) closedir(d);
-        }
-        if (want) {
-            static uint32_t neg[128]; static int negn;   /* huellas sin override */
-            int miss = 0;
-            for (int i = 0; i < negn; i++) if (neg[i] == fp) { miss = 1; break; }
-            if (!miss) {
-                char path[80];
-                snprintf(path, sizeof path, "sdmc:/djmax/tex/%08X.rgba", fp);
-                FILE *f = fopen(path, "rb");
-                if (f) {
-                    const size_t need = (size_t)w * h * 4u;
-                    if (fread(img.rgba, 1, need, f) == need) {
-                        static uint32_t ov_logs;
-                        if (ov_logs < 8u) { ov_logs++;
-                            psp_printf("[tex] override %08X (%ux%u)\n", fp, w, h); }
+    {   /* Texture packs: <FP>.rgba (RGBA8 crudo, WxH exactos) reemplaza el arte
+         * decodificado. Fuentes: sdmc:/djmax/tex (el usuario manda) y romfs:/tex
+         * (incluido en el CIA). El índice se arma una vez: sin I/O por cada miss. */
+        static struct { uint32_t fp; uint8_t src; } packs[256];
+        static int npacks, scanned;
+        if (!scanned) {
+            scanned = 1;
+            static const char *const dirs[2] = { "sdmc:/djmax/tex", "romfs:/tex" };
+            for (int s = 0; s < 2; s++) {
+                DIR *d = opendir(dirs[s]);
+                if (!d) continue;
+                for (struct dirent *e; (e = readdir(d)) != NULL && npacks < 256; ) {
+                    unsigned v;
+                    if (strlen(e->d_name) == 13 && strcmp(e->d_name + 8, ".rgba") == 0 &&
+                        sscanf(e->d_name, "%8x", &v) == 1) {
+                        packs[npacks].fp = v; packs[npacks].src = (uint8_t)s; npacks++;
                     }
-                    fclose(f);
-                } else {
-                    neg[negn & 127] = fp;
-                    if (negn < 127) negn++;
                 }
+                closedir(d);
             }
+            psp_printf("[tex] packs indexados: %d\n", npacks);
+        }
+        for (int i = 0; i < npacks; i++) {
+            if (packs[i].fp != fp) continue;
+            char path[80];
+            snprintf(path, sizeof path, packs[i].src ? "romfs:/tex/%08X.rgba" : "sdmc:/djmax/tex/%08X.rgba", fp);
+            FILE *f = fopen(path, "rb");
+            if (f) {
+                const size_t need = (size_t)w * h * 4u;
+                if (fread(img.rgba, 1, need, f) == need) {
+                    static uint32_t ov_logs;
+                    if (ov_logs < 8u) { ov_logs++;
+                        psp_printf("[tex] override %08X (%ux%u) %s\n", fp, w, h,
+                                   packs[i].src ? "romfs" : "sdmc"); }
+                }
+                fclose(f);
+            }
+            break;
         }
     }
     /* PSP color test (GU_NOTEQUAL): los texels que casan con la clave no se
@@ -1172,8 +1180,10 @@ void ge_draw_init(void) {
     }
     g_ready = 1;
     preview_init();
-    {   /* logo de la pantalla inferior (menús): RGBA8 crudo 512x128 */
+    romfsInit();                       /* assets del CIA; falla sin romfs (3dsx) y se ignora */
+    {   /* logo de la pantalla inferior (menús): RGBA8 crudo 512x256; la SD manda sobre el romfs */
         FILE *f = fopen("sdmc:/djmax/tex/bottom_logo.rgba", "rb");
+        if (!f) f = fopen("romfs:/tex/bottom_logo.rgba", "rb");
         if (f) {
             const size_t need = 512u * 256u * 4u;
             uint32_t *px = (uint32_t *)malloc(need);
@@ -1258,8 +1268,8 @@ void ge_draw_frame(uint32_t fb, uint32_t sync) {
             if (!t0) { t0 = now; f0 = S.frames; }
             else if (S.frames - f0 >= 300u) {
                 const uint32_t ms = (uint32_t)((now - t0) / 1000u);
-                psp_printf("[fps] f=%u avg=%u.%u\n", S.frames,
-                           ms ? 300000u / ms / 10u : 0u, ms ? (300000u / ms) % 10u : 0u);
+                const uint32_t f10 = ms ? 3000000u / ms : 0u;      /* fps x10 */
+                psp_printf("[fps] f=%u avg=%u.%u\n", S.frames, f10 / 10u, f10 % 10u);
                 t0 = now; f0 = S.frames;
             }
         }

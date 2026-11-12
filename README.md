@@ -82,7 +82,7 @@ Outputs `port/3ds/build/djmax3ds.3dsx` (Homebrew Launcher / Azahar). For an inst
 powershell -ExecutionPolicy Bypass -File port/3ds/make_cia.ps1 -ToolsDir C:\path\to\ctr-tools
 ```
 
-`make_cia.ps1` looks for `makerom.exe`/`bannertool.exe` in `-ToolsDir`, next to the script, or on the PATH. The RSF requests New 3DS 804 MHz, L2 cache and the 124 MB app region; the same binary still boots on Old 3DS (slow).
+`make_cia.ps1` looks for `makerom.exe`/`bannertool.exe` in `-ToolsDir`, next to the script, or on the PATH. The RSF requests New 3DS 804 MHz, L2 cache and the 124 MB app region; the same binary still boots on Old 3DS (slow). If port/3ds/cia/romfs/tex/ exists (e.g. `57D2183C.rgba` title-logo pack and `bottom_logo.rgba`), make_cia.ps1 embeds it as the CIA RomFS so a single .cia carries its own logos; files in sdmc:/djmax/tex still take priority. These assets are derived from the game's art and are git-ignored, never distributed.
 
 ### SD card layout (emulator `sdmc/` folder or the console's SD)
 
